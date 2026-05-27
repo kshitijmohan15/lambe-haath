@@ -230,7 +230,7 @@ fn respondProjectsCreate(
     request: *http.Server.Request,
     opts: ServeOptions,
 ) !void {
-    // Extract Content-Type / boundary BEFORE calling readerExpectNone — that call
+    // Extract Content-Type / boundary BEFORE engaging the body reader — that call
     // invalidates the head's string fields. Copy boundary into a local owned slice
     // so we can keep using it after the reader is engaged.
     const ct_in = request.head.content_type orelse {
@@ -242,9 +242,15 @@ fn respondProjectsCreate(
     const boundary = try gpa.dupe(u8, boundary_ref);
     defer gpa.free(boundary);
 
-    // Read entire request body into memory (capped at 100 MiB).
+    // Read entire request body into memory (capped at 100 MiB). Use
+    // readerExpectContinue (not readerExpectNone) so clients that send
+    // "Expect: 100-continue" (curl, many HTTP libraries) get the continuation
+    // header instead of tripping readerExpectNone's `expect == null` assert,
+    // which would panic and abort the whole daemon.
     var read_buf: [4096]u8 = undefined;
-    const body_reader = request.readerExpectNone(&read_buf);
+    const body_reader = request.readerExpectContinue(&read_buf) catch {
+        return respondError(request, .bad_request, "INVALID_REQUEST", "Failed to read body");
+    };
     const body = body_reader.allocRemaining(gpa, .limited(100 * 1024 * 1024)) catch |err| switch (err) {
         error.StreamTooLong => return respondError(request, .payload_too_large, "INVALID_PDF", "Upload too large"),
         else => return respondError(request, .bad_request, "INVALID_REQUEST", "Failed to read body"),
