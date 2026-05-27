@@ -173,3 +173,26 @@ build.zig drove the correct target for each (libs from
   were not executed** (impossible on a macOS host). Runtime behavior on Windows
   / Linux is unverified and should be smoke-tested on real targets (or under an
   emulator/CI runner) before release.
+
+## Daemon-serves-UI (disk)
+
+The daemon serves the SvelteKit SPA's static files from a directory on disk —
+no embedding, `build.zig` untouched, daemon build stays node-free. The dir is
+`CHARGESHEET_UI_DIR` if set, else `<exe_dir>/ui`. SPA fallback to `index.html`,
+MIME by extension, query strings stripped, path-traversal guarded.
+
+Dev / manual run (after `cd chargesheet-ui && yarn build`):
+
+```bash
+CHARGESHEET_UI_DIR="$PWD/chargesheet-ui/build" ./logos/zig-out/bin/logos -p 7777
+# open http://localhost:7777 — API + UI on one port, no `yarn dev`
+```
+
+For the installer (#3): build the UI in CI and place it at `<exe_dir>/ui` next
+to the daemon binary; no env var needed on the user's machine.
+
+Verified 2026-05-27 against the real `chargesheet-ui` build: `/` → SvelteKit
+HTML; `/_app/…js` (and `…js?v=…`) → 200 `text/javascript`; deep link → SPA
+index.html; `/api/v1/health` → JSON; `robots.txt` → `text/plain`; traversal →
+safe fallback. (Browser end-to-end drive of the SPA against the API not yet
+done — see plan Task 2 Step 3.)

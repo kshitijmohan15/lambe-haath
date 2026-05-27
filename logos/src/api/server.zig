@@ -1,6 +1,6 @@
-//! Minimal HTTP server skeleton for the Phase 8a daemon.
+//! Minimal HTTP server for the daemon.
 //!
-//! Single-threaded sync accept loop. Handles three concerns:
+//! Thread-per-connection accept loop. Handles three concerns:
 //!   * GET /api/v1/health  -> 200 JSON {"status":"ok","version":"<v>"}
 //!   * OPTIONS /api/*      -> 204 with CORS headers (preflight)
 //!   * everything else     -> 404 JSON {"code":"NOT_FOUND",...}
@@ -17,6 +17,7 @@ const json = @import("json.zig");
 const Db = @import("../db/db.zig").Db;
 const router = @import("router.zig");
 const handlers = @import("handlers.zig");
+const static = @import("static.zig");
 const slices_mod = @import("../db/slices.zig");
 
 const cors_origin = "http://localhost:5173";
@@ -31,9 +32,21 @@ pub const ServeOptions = struct {
     port: u16,
     version: []const u8,
     data_dir: []const u8,
+    ui_dir: []const u8,
 };
 
-/// Bind 0.0.0.0:port and serve requests forever. Returns only on fatal error.
+/// Bind 0.0.0.0:port and serve connections forever. Returns only on fatal error.
+///
+/// Thread-per-connection: each accepted connection runs on its own detached OS
+/// thread, so the accept loop never blocks waiting on one client. Connections
+/// are keep-alive (the client closes them), so the server is not the active
+/// closer and does not accumulate TIME_WAIT sockets that would block a quick
+/// restart under reuse_address=false. A single mutex serializes request
+/// *processing* (acquired only after `receiveHead`, released while a connection
+/// idles), so the shared SQLite connection and allocator are never used
+/// concurrently regardless of SQLite's compiled thread mode. Trade-off: a slow
+/// request (e.g. a sync slice job) briefly serializes other requests — fine for
+/// a single-user local tool.
 pub fn serve(io: std.Io, gpa: std.mem.Allocator, db: *Db, opts: ServeOptions) !void {
     const address = try net.IpAddress.parseIp4("0.0.0.0", opts.port);
     // reuse_address=false so a second daemon on the same port fails loudly with
@@ -45,16 +58,23 @@ pub fn serve(io: std.Io, gpa: std.mem.Allocator, db: *Db, opts: ServeOptions) !v
 
     std.log.info("HTTP listening on http://0.0.0.0:{d}/", .{opts.port});
 
+    var req_mutex: std.Io.Mutex = .init;
     while (true) {
         const stream = tcp_server.accept(io) catch |err| {
             std.log.err("accept failed: {t}", .{err});
             continue;
         };
-        handleConnection(io, gpa, db, stream, opts);
+        const thread = std.Thread.spawn(.{}, handleConnection, .{ io, gpa, db, stream, opts, &req_mutex }) catch |err| {
+            std.log.err("connection thread spawn failed: {t}", .{err});
+            var copy = stream;
+            copy.close(io);
+            continue;
+        };
+        thread.detach();
     }
 }
 
-fn handleConnection(io: std.Io, gpa: std.mem.Allocator, db: *Db, stream: net.Stream, opts: ServeOptions) void {
+fn handleConnection(io: std.Io, gpa: std.mem.Allocator, db: *Db, stream: net.Stream, opts: ServeOptions, req_mutex: *std.Io.Mutex) void {
     defer {
         // net.Stream.close wants to overwrite stream with undefined, but
         // immutable parameter — copy first. (Same pattern as std/Build/WebServer.zig.)
@@ -67,6 +87,9 @@ fn handleConnection(io: std.Io, gpa: std.mem.Allocator, db: *Db, stream: net.Str
     var connection_writer = stream.writer(io, &send_buffer);
     var server: http.Server = .init(&connection_reader.interface, &connection_writer.interface);
 
+    // Keep-alive loop: serve requests until the client closes the connection.
+    // receiveHead blocks WITHOUT the mutex, so an idle connection never blocks
+    // other connections' request processing.
     while (true) {
         var request = server.receiveHead() catch |err| switch (err) {
             error.HttpConnectionClosing => return,
@@ -75,6 +98,8 @@ fn handleConnection(io: std.Io, gpa: std.mem.Allocator, db: *Db, stream: net.Str
                 return;
             },
         };
+        req_mutex.lockUncancelable(io);
+        defer req_mutex.unlock(io);
         serveRequest(io, gpa, db, &request, opts) catch |err| {
             std.log.err("serveRequest failed: {t}", .{err});
             return;
@@ -114,8 +139,48 @@ fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Serv
         .projects_slices_list => respondProjectsSlicesList(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .projects_slices_get => respondProjectsSlicesGet(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
         .projects_slices_delete => respondProjectsSlicesDelete(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
-        .not_found => respondNotFound(gpa, request),
+        .not_found => {
+            // Strip any `?query` before the on-disk lookup: SvelteKit/Vite assets
+            // carry cache-busting params (e.g. app.js?v=2) that would otherwise
+            // miss the file and fall through to the SPA index.html fallback.
+            const ui_path = static.stripQuery(target);
+            const served = static.resolve(io, gpa, opts.ui_dir, request.head.method == .GET, ui_path) catch
+                return respondNotFound(gpa, request);
+            switch (served) {
+                .file => |f| {
+                    defer gpa.free(f.abs_path);
+                    try respondFile(io, gpa, request, f.abs_path, f.mime);
+                },
+                .placeholder => try respondUiPlaceholder(request, opts.ui_dir),
+                .not_handled => try respondNotFound(gpa, request),
+            }
+        },
     };
+}
+
+fn respondFile(io: std.Io, gpa: std.mem.Allocator, request: *http.Server.Request, abs_path: []const u8, mime: []const u8) !void {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, abs_path, gpa, .limited(100 * 1024 * 1024)) catch
+        return respondNotFound(gpa, request);
+    defer gpa.free(bytes);
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = mime },
+    } ++ cors_headers;
+    try request.respond(bytes, .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondUiPlaceholder(request: *http.Server.Request, ui_dir: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.print(
+        "logos daemon is running, but no web UI was found at:\n  {s}\n\n" ++
+            "Build it (cd chargesheet-ui && yarn build) and set CHARGESHEET_UI_DIR to that build/ dir,\n" ++
+            "or run the dev UI: cd chargesheet-ui && yarn dev (http://localhost:5173).\n",
+        .{ui_dir},
+    );
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "text/plain" },
+    } ++ cors_headers;
+    try request.respond(w.buffered(), .{ .status = .ok, .extra_headers = &headers });
 }
 
 fn respondCors(request: *http.Server.Request) !void {
@@ -165,7 +230,7 @@ fn respondProjectsCreate(
     request: *http.Server.Request,
     opts: ServeOptions,
 ) !void {
-    // Extract Content-Type / boundary BEFORE calling readerExpectNone — that call
+    // Extract Content-Type / boundary BEFORE engaging the body reader — that call
     // invalidates the head's string fields. Copy boundary into a local owned slice
     // so we can keep using it after the reader is engaged.
     const ct_in = request.head.content_type orelse {
@@ -177,9 +242,15 @@ fn respondProjectsCreate(
     const boundary = try gpa.dupe(u8, boundary_ref);
     defer gpa.free(boundary);
 
-    // Read entire request body into memory (capped at 100 MiB).
+    // Read entire request body into memory (capped at 100 MiB). Use
+    // readerExpectContinue (not readerExpectNone) so clients that send
+    // "Expect: 100-continue" (curl, many HTTP libraries) get the continuation
+    // header instead of tripping readerExpectNone's `expect == null` assert,
+    // which would panic and abort the whole daemon.
     var read_buf: [4096]u8 = undefined;
-    const body_reader = request.readerExpectNone(&read_buf);
+    const body_reader = request.readerExpectContinue(&read_buf) catch {
+        return respondError(request, .bad_request, "INVALID_REQUEST", "Failed to read body");
+    };
     const body = body_reader.allocRemaining(gpa, .limited(100 * 1024 * 1024)) catch |err| switch (err) {
         error.StreamTooLong => return respondError(request, .payload_too_large, "INVALID_PDF", "Upload too large"),
         else => return respondError(request, .bad_request, "INVALID_REQUEST", "Failed to read body"),
