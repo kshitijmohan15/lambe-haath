@@ -15,6 +15,11 @@ pub fn mimeForPath(path: []const u8) []const u8 {
     const ext = std.fs.path.extension(path);
     if (std.mem.eql(u8, ext, ".html")) return "text/html";
     if (std.mem.eql(u8, ext, ".js")) return "text/javascript";
+    // .mjs MUST be a JS MIME type or browsers refuse to execute the ES module
+    // (e.g. SvelteKit/pdf.js dynamically import `pdf.worker.min….mjs`).
+    if (std.mem.eql(u8, ext, ".mjs")) return "text/javascript";
+    if (std.mem.eql(u8, ext, ".wasm")) return "application/wasm";
+    if (std.mem.eql(u8, ext, ".map")) return "application/json";
     if (std.mem.eql(u8, ext, ".css")) return "text/css";
     if (std.mem.eql(u8, ext, ".json")) return "application/json";
     if (std.mem.eql(u8, ext, ".svg")) return "image/svg+xml";
@@ -160,6 +165,8 @@ test "stripQuery removes cache-busting params" {
 
 test "mimeForPath coverage" {
     try testing.expectEqualStrings("text/javascript", mimeForPath("/x.js"));
+    try testing.expectEqualStrings("text/javascript", mimeForPath("/pdf.worker.min.abc.mjs"));
+    try testing.expectEqualStrings("application/wasm", mimeForPath("/x.wasm"));
     try testing.expectEqualStrings("image/png", mimeForPath("/favicon.png"));
     try testing.expectEqualStrings("application/octet-stream", mimeForPath("/weird.xyz"));
 }

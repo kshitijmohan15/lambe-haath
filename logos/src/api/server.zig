@@ -1,6 +1,6 @@
-//! Minimal HTTP server skeleton for the Phase 8a daemon.
+//! Minimal HTTP server for the daemon.
 //!
-//! Single-threaded sync accept loop. Handles three concerns:
+//! Thread-per-connection accept loop. Handles three concerns:
 //!   * GET /api/v1/health  -> 200 JSON {"status":"ok","version":"<v>"}
 //!   * OPTIONS /api/*      -> 204 with CORS headers (preflight)
 //!   * everything else     -> 404 JSON {"code":"NOT_FOUND",...}
@@ -35,7 +35,18 @@ pub const ServeOptions = struct {
     ui_dir: []const u8,
 };
 
-/// Bind 0.0.0.0:port and serve requests forever. Returns only on fatal error.
+/// Bind 0.0.0.0:port and serve connections forever. Returns only on fatal error.
+///
+/// Thread-per-connection: each accepted connection runs on its own detached OS
+/// thread, so the accept loop never blocks waiting on one client. Connections
+/// are keep-alive (the client closes them), so the server is not the active
+/// closer and does not accumulate TIME_WAIT sockets that would block a quick
+/// restart under reuse_address=false. A single mutex serializes request
+/// *processing* (acquired only after `receiveHead`, released while a connection
+/// idles), so the shared SQLite connection and allocator are never used
+/// concurrently regardless of SQLite's compiled thread mode. Trade-off: a slow
+/// request (e.g. a sync slice job) briefly serializes other requests — fine for
+/// a single-user local tool.
 pub fn serve(io: std.Io, gpa: std.mem.Allocator, db: *Db, opts: ServeOptions) !void {
     const address = try net.IpAddress.parseIp4("0.0.0.0", opts.port);
     // reuse_address=false so a second daemon on the same port fails loudly with
@@ -47,16 +58,23 @@ pub fn serve(io: std.Io, gpa: std.mem.Allocator, db: *Db, opts: ServeOptions) !v
 
     std.log.info("HTTP listening on http://0.0.0.0:{d}/", .{opts.port});
 
+    var req_mutex: std.Io.Mutex = .init;
     while (true) {
         const stream = tcp_server.accept(io) catch |err| {
             std.log.err("accept failed: {t}", .{err});
             continue;
         };
-        handleConnection(io, gpa, db, stream, opts);
+        const thread = std.Thread.spawn(.{}, handleConnection, .{ io, gpa, db, stream, opts, &req_mutex }) catch |err| {
+            std.log.err("connection thread spawn failed: {t}", .{err});
+            var copy = stream;
+            copy.close(io);
+            continue;
+        };
+        thread.detach();
     }
 }
 
-fn handleConnection(io: std.Io, gpa: std.mem.Allocator, db: *Db, stream: net.Stream, opts: ServeOptions) void {
+fn handleConnection(io: std.Io, gpa: std.mem.Allocator, db: *Db, stream: net.Stream, opts: ServeOptions, req_mutex: *std.Io.Mutex) void {
     defer {
         // net.Stream.close wants to overwrite stream with undefined, but
         // immutable parameter — copy first. (Same pattern as std/Build/WebServer.zig.)
@@ -69,24 +87,24 @@ fn handleConnection(io: std.Io, gpa: std.mem.Allocator, db: *Db, stream: net.Str
     var connection_writer = stream.writer(io, &send_buffer);
     var server: http.Server = .init(&connection_reader.interface, &connection_writer.interface);
 
-    var request = server.receiveHead() catch |err| switch (err) {
-        error.HttpConnectionClosing => return,
-        else => {
-            std.log.err("receiveHead failed: {t}", .{err});
+    // Keep-alive loop: serve requests until the client closes the connection.
+    // receiveHead blocks WITHOUT the mutex, so an idle connection never blocks
+    // other connections' request processing.
+    while (true) {
+        var request = server.receiveHead() catch |err| switch (err) {
+            error.HttpConnectionClosing => return,
+            else => {
+                std.log.err("receiveHead failed: {t}", .{err});
+                return;
+            },
+        };
+        req_mutex.lockUncancelable(io);
+        defer req_mutex.unlock(io);
+        serveRequest(io, gpa, db, &request, opts) catch |err| {
+            std.log.err("serveRequest failed: {t}", .{err});
             return;
-        },
-    };
-    // Serve exactly one request per connection, then close. The accept loop is
-    // single-threaded and blocks here for the connection's lifetime, so a
-    // kept-alive idle socket would starve every other connection — a browser
-    // opens ~6 parallel connections to load the page + assets, and all but the
-    // first would hang. Forcing keep_alive=false makes `respond` emit
-    // `connection: close`, so accept() cycles to the next connection promptly.
-    request.head.keep_alive = false;
-    serveRequest(io, gpa, db, &request, opts) catch |err| {
-        std.log.err("serveRequest failed: {t}", .{err});
-        return;
-    };
+        };
+    }
 }
 
 fn methodFromHttp(m: http.Method) ?router.Method {
