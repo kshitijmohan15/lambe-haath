@@ -1,0 +1,165 @@
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      is_release: ${{ steps.v.outputs.is_release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+            scripts/check-version.sh "$tag"   # fails on mismatch
+            echo "version=$tag" >> "$GITHUB_OUTPUT"
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dryrun+${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - working-directory: chargesheet-ui
+        run: |
+          yarn install --frozen-lockfile
+          yarn build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui
+          path: chargesheet-ui/build
+
+  build:
+    needs: [guard, ui]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14,      target: aarch64-macos,     platform: macos-arm64 }
+          - { os: macos-13,      target: x86_64-macos,      platform: macos-x64 }
+          - { os: ubuntu-latest, target: x86_64-linux-musl,  platform: linux-x64 }
+          - { os: ubuntu-latest, target: x86_64-windows-gnu, platform: windows-x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with: { version: "0.16.0" }
+      - name: Cache MuPDF/zig build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            logos/.zig-cache
+          key: zigbuild-${{ matrix.platform }}-${{ hashFiles('mupdf-zig/**', 'logos/build.zig.zon', 'logos/build.zig') }}
+      - name: Build daemon
+        working-directory: logos
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+      - uses: actions/download-artifact@v4
+        with: { name: ui, path: ui-build }
+      - name: Package bundle
+        shell: bash
+        run: |
+          bin="logos/zig-out/bin/logos"
+          [ "${{ matrix.platform }}" = "windows-x64" ] && bin="logos/zig-out/bin/logos.exe"
+          out="$PWD/dist"; mkdir -p "$out"
+          scripts/package.sh "$bin" ui-build "${{ needs.guard.outputs.version }}" "${{ matrix.platform }}" "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.platform }}
+          path: dist/*
+
+  smoke:
+    needs: [guard, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14,       platform: macos-arm64 }
+          - { os: macos-13,       platform: macos-x64 }
+          - { os: ubuntu-latest,  platform: linux-x64 }
+          - { os: windows-latest, platform: windows-x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle-${{ matrix.platform }}
+          path: dist
+      - name: Smoke (unix)
+        if: matrix.platform != 'windows-x64'
+        shell: bash
+        run: |
+          v="${{ needs.guard.outputs.version }}"
+          mkdir -p ext
+          tar -xzf "dist/logos-${v}-${{ matrix.platform }}.tar.gz" -C ext
+          SMOKE_FIXTURE="$PWD/mupdf-zig/tests/fixtures/sample-10pages.pdf" \
+            scripts/smoke.sh "ext/logos-${v}-${{ matrix.platform }}" 8799
+      - name: Smoke (windows)
+        if: matrix.platform == 'windows-x64'
+        shell: pwsh
+        run: |
+          $v = "${{ needs.guard.outputs.version }}"
+          Expand-Archive -Path "dist/logos-$v-windows-x64.zip" -DestinationPath ext -Force
+          $env:SMOKE_FIXTURE = "$PWD/mupdf-zig/tests/fixtures/sample-10pages.pdf"
+          scripts/smoke.ps1 -Bundle "ext/logos-$v-windows-x64" -Port 8799
+
+  release:
+    needs: [guard, smoke]
+    if: needs.guard.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: bundle-*, path: dist, merge-multiple: true }
+      - name: Build SHA256SUMS
+        shell: bash
+        run: |
+          cd dist
+          rm -f SHA256SUMS
+          cat *.sha256 > SHA256SUMS || true
+          ls -la
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.guard.outputs.version }}
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+
+  install-verify:
+    needs: [guard, release]
+    if: needs.guard.outputs.is_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-13, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install + verify (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          LOGOS_VERSION="${{ needs.guard.outputs.version }}" sh install.sh
+          "$HOME/.local/bin/logos" -V
+      - name: Install + verify (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:LOGOS_VERSION = "${{ needs.guard.outputs.version }}"
+          ./install.ps1
+          & "$env:LOCALAPPDATA/lambe-haath/logos.exe" -V
