@@ -69,19 +69,24 @@ fn handleConnection(io: std.Io, gpa: std.mem.Allocator, db: *Db, stream: net.Str
     var connection_writer = stream.writer(io, &send_buffer);
     var server: http.Server = .init(&connection_reader.interface, &connection_writer.interface);
 
-    while (true) {
-        var request = server.receiveHead() catch |err| switch (err) {
-            error.HttpConnectionClosing => return,
-            else => {
-                std.log.err("receiveHead failed: {t}", .{err});
-                return;
-            },
-        };
-        serveRequest(io, gpa, db, &request, opts) catch |err| {
-            std.log.err("serveRequest failed: {t}", .{err});
+    var request = server.receiveHead() catch |err| switch (err) {
+        error.HttpConnectionClosing => return,
+        else => {
+            std.log.err("receiveHead failed: {t}", .{err});
             return;
-        };
-    }
+        },
+    };
+    // Serve exactly one request per connection, then close. The accept loop is
+    // single-threaded and blocks here for the connection's lifetime, so a
+    // kept-alive idle socket would starve every other connection — a browser
+    // opens ~6 parallel connections to load the page + assets, and all but the
+    // first would hang. Forcing keep_alive=false makes `respond` emit
+    // `connection: close`, so accept() cycles to the next connection promptly.
+    request.head.keep_alive = false;
+    serveRequest(io, gpa, db, &request, opts) catch |err| {
+        std.log.err("serveRequest failed: {t}", .{err});
+        return;
+    };
 }
 
 fn methodFromHttp(m: http.Method) ?router.Method {
