@@ -1,0 +1,20 @@
+.{
+    .name = .mupdf_zig,
+    .version = "0.1.0",
+    .fingerprint = 0x6b0b2444b10cccc2,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .mupdf_src = .{
+            .url = "https://mupdf.com/downloads/archive/mupdf-1.27.2-source.tar.gz",
+            .hash = "N-V-__8AAG4_gwpa9xSDdrg00gI6Lhv6Yl6WQUxxbZ7AYBZa",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "tests",
+        "README.md",
+    },
+}

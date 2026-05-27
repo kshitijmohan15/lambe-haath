@@ -1,0 +1,5 @@
+zig-out/
+zig-cache/
+.zig-cache/
+# stray unpacked MuPDF source (the build uses the zig package cache instead)
+zig-pkg/

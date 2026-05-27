@@ -1,0 +1,624 @@
+//! Minimal HTTP server skeleton for the Phase 8a daemon.
+//!
+//! Single-threaded sync accept loop. Handles three concerns:
+//!   * GET /api/v1/health  -> 200 JSON {"status":"ok","version":"<v>"}
+//!   * OPTIONS /api/*      -> 204 with CORS headers (preflight)
+//!   * everything else     -> 404 JSON {"code":"NOT_FOUND",...}
+//!
+//! All responses carry CORS headers allowing the Vite dev origin
+//! `http://localhost:5173`. Later phases will replace this with a richer
+//! router but the wire shape established here is stable.
+
+const std = @import("std");
+const net = std.Io.net;
+const http = std.http;
+const mupdf = @import("mupdf");
+const json = @import("json.zig");
+const Db = @import("../db/db.zig").Db;
+const router = @import("router.zig");
+const handlers = @import("handlers.zig");
+const slices_mod = @import("../db/slices.zig");
+
+const cors_origin = "http://localhost:5173";
+
+const cors_headers = [_]std.http.Header{
+    .{ .name = "Access-Control-Allow-Origin", .value = cors_origin },
+    .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, DELETE, OPTIONS" },
+    .{ .name = "Access-Control-Allow-Headers", .value = "Content-Type" },
+};
+
+pub const ServeOptions = struct {
+    port: u16,
+    version: []const u8,
+    data_dir: []const u8,
+};
+
+/// Bind 0.0.0.0:port and serve requests forever. Returns only on fatal error.
+pub fn serve(io: std.Io, gpa: std.mem.Allocator, db: *Db, opts: ServeOptions) !void {
+    const address = try net.IpAddress.parseIp4("0.0.0.0", opts.port);
+    // reuse_address=false so a second daemon on the same port fails loudly with
+    // AddressInUse. The lock file alone only guards same-data_dir collisions —
+    // without this, SO_REUSEPORT would let two daemons bind the same port and
+    // the kernel would silently load-balance traffic between them.
+    var tcp_server = try address.listen(io, .{ .reuse_address = false });
+    defer tcp_server.deinit(io);
+
+    std.log.info("HTTP listening on http://0.0.0.0:{d}/", .{opts.port});
+
+    while (true) {
+        const stream = tcp_server.accept(io) catch |err| {
+            std.log.err("accept failed: {t}", .{err});
+            continue;
+        };
+        handleConnection(io, gpa, db, stream, opts);
+    }
+}
+
+fn handleConnection(io: std.Io, gpa: std.mem.Allocator, db: *Db, stream: net.Stream, opts: ServeOptions) void {
+    defer {
+        // net.Stream.close wants to overwrite stream with undefined, but
+        // immutable parameter — copy first. (Same pattern as std/Build/WebServer.zig.)
+        var copy = stream;
+        copy.close(io);
+    }
+    var send_buffer: [4096]u8 = undefined;
+    var recv_buffer: [4096]u8 = undefined;
+    var connection_reader = stream.reader(io, &recv_buffer);
+    var connection_writer = stream.writer(io, &send_buffer);
+    var server: http.Server = .init(&connection_reader.interface, &connection_writer.interface);
+
+    while (true) {
+        var request = server.receiveHead() catch |err| switch (err) {
+            error.HttpConnectionClosing => return,
+            else => {
+                std.log.err("receiveHead failed: {t}", .{err});
+                return;
+            },
+        };
+        serveRequest(io, gpa, db, &request, opts) catch |err| {
+            std.log.err("serveRequest failed: {t}", .{err});
+            return;
+        };
+    }
+}
+
+fn methodFromHttp(m: http.Method) ?router.Method {
+    return switch (m) {
+        .GET => .GET,
+        .POST => .POST,
+        .DELETE => .DELETE,
+        .OPTIONS => .OPTIONS,
+        else => null,
+    };
+}
+
+fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Server.Request, opts: ServeOptions) !void {
+    const target = request.head.target;
+    std.log.info("{t} {s}", .{ request.head.method, target });
+
+    const method = methodFromHttp(request.head.method) orelse {
+        return respondNotFound(gpa, request);
+    };
+    const m = router.match(method, target);
+
+    return switch (m.route) {
+        .health => respondHealth(gpa, request, opts.version),
+        .cors_preflight => respondCors(request),
+        .projects_list => respondProjectsList(gpa, db, request),
+        .projects_create => respondProjectsCreate(io, gpa, db, request, opts),
+        .projects_get => respondProjectsGet(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .projects_delete => respondProjectsDelete(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request)),
+        .projects_chargesheet => respondProjectsChargesheet(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request)),
+        .projects_jobs_slice => respondProjectsJobsSlice(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request)),
+        .projects_jobs_get => respondProjectsJobsGet(gpa, db, request, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
+        .projects_slices_list => respondProjectsSlicesList(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .projects_slices_get => respondProjectsSlicesGet(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
+        .projects_slices_delete => respondProjectsSlicesDelete(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
+        .not_found => respondNotFound(gpa, request),
+    };
+}
+
+fn respondCors(request: *http.Server.Request) !void {
+    try request.respond("", .{
+        .status = .no_content,
+        .extra_headers = &cors_headers,
+    });
+}
+
+fn respondHealth(gpa: std.mem.Allocator, request: *http.Server.Request, version: []const u8) !void {
+    _ = gpa;
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try json.writeHealth(&w, version);
+    const body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(body, .{
+        .status = .ok,
+        .extra_headers = &headers,
+    });
+}
+
+fn respondProjectsList(gpa: std.mem.Allocator, db: *Db, request: *http.Server.Request) !void {
+    var buf: [16 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try handlers.handleProjectsList(gpa, db, &w);
+    const body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(body, .{
+        .status = .ok,
+        .extra_headers = &headers,
+    });
+}
+
+fn respondProjectsCreate(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    opts: ServeOptions,
+) !void {
+    // Extract Content-Type / boundary BEFORE calling readerExpectNone — that call
+    // invalidates the head's string fields. Copy boundary into a local owned slice
+    // so we can keep using it after the reader is engaged.
+    const ct_in = request.head.content_type orelse {
+        return respondError(request, .bad_request, "INVALID_REQUEST", "Missing Content-Type");
+    };
+    const boundary_ref = extractBoundary(ct_in) orelse {
+        return respondError(request, .bad_request, "INVALID_REQUEST", "Multipart boundary missing");
+    };
+    const boundary = try gpa.dupe(u8, boundary_ref);
+    defer gpa.free(boundary);
+
+    // Read entire request body into memory (capped at 100 MiB).
+    var read_buf: [4096]u8 = undefined;
+    const body_reader = request.readerExpectNone(&read_buf);
+    const body = body_reader.allocRemaining(gpa, .limited(100 * 1024 * 1024)) catch |err| switch (err) {
+        error.StreamTooLong => return respondError(request, .payload_too_large, "INVALID_PDF", "Upload too large"),
+        else => return respondError(request, .bad_request, "INVALID_REQUEST", "Failed to read body"),
+    };
+    defer gpa.free(body);
+
+    // Per-request mupdf context. Cheap; sync handler so no thread issues.
+    var mupdf_ctx = mupdf.Context.init() catch {
+        return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Failed to init MuPDF");
+    };
+    defer mupdf_ctx.deinit();
+
+    var project = handlers.handleProjectsCreate(io, gpa, db, opts.data_dir, &mupdf_ctx, boundary, body) catch |err| {
+        return respondCreateError(request, err);
+    };
+    defer project.deinit(gpa);
+
+    var resp_buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&resp_buf);
+    try json.writeProject(&w, project);
+    const resp_body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(resp_body, .{
+        .status = .created,
+        .extra_headers = &headers,
+    });
+}
+
+/// Extract the `boundary` parameter from a multipart Content-Type header.
+/// Handles both quoted (`boundary="xxx"`) and unquoted (`boundary=xxx`) forms.
+fn extractBoundary(content_type: []const u8) ?[]const u8 {
+    const key = "boundary=";
+    const start = std.mem.indexOf(u8, content_type, key) orelse return null;
+    const after = start + key.len;
+    if (after >= content_type.len) return null;
+    if (content_type[after] == '"') {
+        const close = std.mem.indexOfScalarPos(u8, content_type, after + 1, '"') orelse return null;
+        return content_type[after + 1 .. close];
+    }
+    var end = after;
+    while (end < content_type.len and content_type[end] != ';' and content_type[end] != ' ') : (end += 1) {}
+    return content_type[after..end];
+}
+
+fn respondError(
+    request: *http.Server.Request,
+    status: std.http.Status,
+    code: []const u8,
+    message: []const u8,
+) !void {
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try json.writeError(&w, code, message);
+    const body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(body, .{ .status = status, .extra_headers = &headers });
+}
+
+fn respondCreateError(request: *http.Server.Request, err: handlers.CreateError) !void {
+    const status: std.http.Status = switch (err) {
+        error.InvalidName, error.InvalidDescription, error.InvalidPdf, error.InvalidRequest => .bad_request,
+        error.NameConflict => .conflict,
+        error.DbError, error.PdfError, error.IoError, error.OutOfMemory => .internal_server_error,
+    };
+    const code: []const u8 = switch (err) {
+        error.InvalidName => "INVALID_NAME",
+        error.InvalidDescription => "INVALID_DESCRIPTION",
+        error.InvalidPdf => "INVALID_PDF",
+        error.InvalidRequest => "INVALID_REQUEST",
+        error.NameConflict => "NAME_CONFLICT",
+        error.DbError, error.PdfError, error.IoError, error.OutOfMemory => "INTERNAL_ERROR",
+    };
+    const message: []const u8 = switch (err) {
+        error.InvalidName => "Name is required (max 200 chars)",
+        error.InvalidDescription => "Description must be <= 2000 chars",
+        error.InvalidPdf => "Invalid PDF file",
+        error.InvalidRequest => "Invalid request",
+        error.NameConflict => "A project with this name already exists",
+        error.DbError, error.PdfError, error.IoError, error.OutOfMemory => "Internal error",
+    };
+    try respondError(request, status, code, message);
+}
+
+fn respondProjectsGet(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    id: []const u8,
+) !void {
+    var project = handlers.handleProjectsGet(gpa, db, id) catch |err| {
+        return respondGetError(request, err);
+    };
+    defer project.deinit(gpa);
+
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try json.writeProject(&w, project);
+    const body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(body, .{
+        .status = .ok,
+        .extra_headers = &headers,
+    });
+}
+
+fn respondProjectsDelete(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    opts: ServeOptions,
+    id: []const u8,
+) !void {
+    handlers.handleProjectsDelete(io, gpa, db, opts.data_dir, id) catch |err| {
+        return respondDeleteError(request, err);
+    };
+    // 204 No Content, empty body, with CORS.
+    try request.respond("", .{
+        .status = .no_content,
+        .extra_headers = &cors_headers,
+    });
+}
+
+fn respondGetError(request: *http.Server.Request, err: handlers.GetError) !void {
+    const status: std.http.Status = switch (err) {
+        error.NotFound => .not_found,
+        error.OutOfMemory, error.DbError => .internal_server_error,
+    };
+    const code: []const u8 = switch (err) {
+        error.NotFound => "NOT_FOUND",
+        else => "INTERNAL_ERROR",
+    };
+    const message: []const u8 = switch (err) {
+        error.NotFound => "Project not found",
+        else => "Internal error",
+    };
+    try respondError(request, status, code, message);
+}
+
+fn respondProjectsChargesheet(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    opts: ServeOptions,
+    id: []const u8,
+) !void {
+    const result = handlers.handleProjectsChargesheet(io, gpa, db, opts.data_dir, id) catch |err| {
+        return respondChargesheetError(request, err);
+    };
+    defer result.deinit(gpa);
+
+    // Build the Content-Disposition header. RFC 6266 says we may quote the
+    // filename, but `"`, `\`, and CTLs must not appear unescaped inside
+    // quotes. We sanitize defensively by replacing any such bytes with `_`.
+    // The filename came from a multipart upload, so it is untrusted input.
+    var cd_buf: [512]u8 = undefined;
+    var cd_w = std.Io.Writer.fixed(&cd_buf);
+    try cd_w.writeAll("inline; filename=\"");
+    for (result.filename) |c| {
+        if (c == '"' or c == '\\' or c < 0x20) {
+            try cd_w.writeByte('_');
+        } else {
+            try cd_w.writeByte(c);
+        }
+    }
+    try cd_w.writeAll("\"");
+    const cd_value = cd_w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/pdf" },
+        .{ .name = "Content-Disposition", .value = cd_value },
+    } ++ cors_headers;
+
+    try request.respond(result.bytes, .{
+        .status = .ok,
+        .extra_headers = &headers,
+    });
+}
+
+fn respondChargesheetError(request: *http.Server.Request, err: handlers.ChargesheetError) !void {
+    const status: std.http.Status = switch (err) {
+        error.NotFound => .not_found,
+        error.IoError, error.OutOfMemory, error.DbError => .internal_server_error,
+    };
+    const code: []const u8 = switch (err) {
+        error.NotFound => "NOT_FOUND",
+        else => "INTERNAL_ERROR",
+    };
+    const message: []const u8 = switch (err) {
+        error.NotFound => "Project or chargesheet not found",
+        else => "Internal error",
+    };
+    try respondError(request, status, code, message);
+}
+
+fn respondDeleteError(request: *http.Server.Request, err: handlers.DeleteError) !void {
+    const status: std.http.Status = switch (err) {
+        error.NotFound => .not_found,
+        error.DbError, error.IoError => .internal_server_error,
+    };
+    const code: []const u8 = switch (err) {
+        error.NotFound => "NOT_FOUND",
+        else => "INTERNAL_ERROR",
+    };
+    const message: []const u8 = switch (err) {
+        error.NotFound => "Project not found",
+        else => "Internal error",
+    };
+    try respondError(request, status, code, message);
+}
+
+fn respondProjectsJobsSlice(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    opts: ServeOptions,
+    project_id: []const u8,
+) !void {
+    var read_buf: [4096]u8 = undefined;
+    const body_reader = request.readerExpectNone(&read_buf);
+    const body = body_reader.allocRemaining(gpa, .limited(10 * 1024 * 1024)) catch {
+        return respondError(request, .bad_request, "INVALID_REQUEST", "Body too large or unreadable");
+    };
+    defer gpa.free(body);
+
+    var result = handlers.handleProjectsJobsSlice(io, gpa, db, opts.data_dir, project_id, body) catch |err| {
+        return respondSliceJobError(request, err);
+    };
+    defer result.deinit(gpa);
+
+    var resp_buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&resp_buf);
+    try json.writeJobCreated(&w, result.job_id);
+    const resp_body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(resp_body, .{
+        .status = .accepted, // 202
+        .extra_headers = &headers,
+    });
+}
+
+fn respondSliceJobError(request: *http.Server.Request, err: handlers.SliceJobError) !void {
+    const status: std.http.Status = switch (err) {
+        error.InvalidRequest, error.InvalidRange, error.InvalidFilename, error.DuplicateFilenames => .bad_request,
+        error.ProjectNotFound => .not_found,
+        error.OutOfMemory, error.DbError, error.PdfError, error.IoError => .internal_server_error,
+    };
+    const code: []const u8 = switch (err) {
+        error.InvalidRequest => "INVALID_REQUEST",
+        error.InvalidRange => "INVALID_RANGE",
+        error.InvalidFilename => "INVALID_FILENAME",
+        error.DuplicateFilenames => "DUPLICATE_FILENAMES",
+        error.ProjectNotFound => "NOT_FOUND",
+        else => "INTERNAL_ERROR",
+    };
+    const message: []const u8 = switch (err) {
+        error.InvalidRequest => "Invalid request body",
+        error.InvalidRange => "Page range out of bounds",
+        error.InvalidFilename => "Filename is invalid",
+        error.DuplicateFilenames => "Duplicate filenames in the same request",
+        error.ProjectNotFound => "Project not found",
+        else => "Internal error",
+    };
+    try respondError(request, status, code, message);
+}
+
+fn respondProjectsJobsGet(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+    job_id: []const u8,
+) !void {
+    var job = handlers.handleProjectsJobsGet(gpa, db, project_id, job_id) catch |err| {
+        return switch (err) {
+            error.NotFound => respondError(request, .not_found, "NOT_FOUND", "Job not found"),
+            else => respondError(request, .internal_server_error, "INTERNAL_ERROR", "Internal error"),
+        };
+    };
+    defer job.deinit(gpa);
+
+    var buf: [16 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try json.writeJob(
+        &w,
+        job.id,
+        @tagName(job.status),
+        job.progress,
+        job.results,
+        job.error_msg,
+    );
+    const body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(body, .{
+        .status = .ok,
+        .extra_headers = &headers,
+    });
+}
+
+fn respondProjectsSlicesList(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+) !void {
+    const list = handlers.handleProjectsSlicesList(gpa, db, project_id) catch |err| {
+        return switch (err) {
+            error.NotFound => respondError(request, .not_found, "NOT_FOUND", "Project not found"),
+            else => respondError(request, .internal_server_error, "INTERNAL_ERROR", "Internal error"),
+        };
+    };
+    defer slices_mod.deinitList(list, gpa);
+
+    var buf: [16 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try json.writeSliceListingArrayOpen(&w);
+    for (list, 0..) |s, i| {
+        if (i > 0) try w.writeAll(",");
+        try json.writeSliceListingItem(&w, s.filename, s.start_page, s.end_page, s.size_bytes, s.created_at);
+    }
+    try json.writeSliceListingArrayClose(&w);
+    const body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(body, .{
+        .status = .ok,
+        .extra_headers = &headers,
+    });
+}
+
+fn respondProjectsSlicesGet(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    opts: ServeOptions,
+    project_id: []const u8,
+    filename: []const u8,
+) !void {
+    const result = handlers.handleProjectsSlicesGet(io, gpa, db, opts.data_dir, project_id, filename) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.NotFound => .not_found,
+            error.InvalidFilename => .bad_request,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.NotFound => "NOT_FOUND",
+            error.InvalidFilename => "INVALID_FILENAME",
+            else => "INTERNAL_ERROR",
+        };
+        return respondError(request, status, code, "Slice not available");
+    };
+    defer result.deinit(gpa);
+
+    // Sanitize filename for Content-Disposition (same pattern as chargesheet handler).
+    var cd_buf: [512]u8 = undefined;
+    var cd_w = std.Io.Writer.fixed(&cd_buf);
+    try cd_w.writeAll("inline; filename=\"");
+    for (result.filename) |c| {
+        if (c == '"' or c == '\\' or c < 0x20) {
+            try cd_w.writeByte('_');
+        } else {
+            try cd_w.writeByte(c);
+        }
+    }
+    try cd_w.writeAll("\"");
+    const cd_value = cd_w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/pdf" },
+        .{ .name = "Content-Disposition", .value = cd_value },
+    } ++ cors_headers;
+
+    try request.respond(result.bytes, .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondProjectsSlicesDelete(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    opts: ServeOptions,
+    project_id: []const u8,
+    filename: []const u8,
+) !void {
+    handlers.handleProjectsSlicesDelete(io, gpa, db, opts.data_dir, project_id, filename) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.NotFound => .not_found,
+            error.InvalidFilename => .bad_request,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.NotFound => "NOT_FOUND",
+            error.InvalidFilename => "INVALID_FILENAME",
+            else => "INTERNAL_ERROR",
+        };
+        return respondError(request, status, code, "Slice not deleted");
+    };
+    try request.respond("", .{ .status = .no_content, .extra_headers = &cors_headers });
+}
+
+fn respondNotFound(gpa: std.mem.Allocator, request: *http.Server.Request) !void {
+    _ = gpa;
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try json.writeError(&w, "NOT_FOUND", "Endpoint not found");
+    const body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(body, .{
+        .status = .not_found,
+        .extra_headers = &headers,
+    });
+}

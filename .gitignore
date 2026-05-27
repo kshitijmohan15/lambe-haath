@@ -1,0 +1,13 @@
+# Zig build artifacts + dependency caches
+**/zig-out/
+**/.zig-cache/
+**/zig-cache/
+**/zig-pkg/
+
+# Node / SvelteKit (chargesheet-ui)
+**/node_modules/
+chargesheet-ui/.svelte-kit/
+chargesheet-ui/build/
+
+# OS
+.DS_Store
