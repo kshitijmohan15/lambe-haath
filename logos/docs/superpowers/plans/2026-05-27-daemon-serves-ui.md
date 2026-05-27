@@ -1,14 +1,14 @@
-# Daemon Serves Embedded UI — Implementation Plan
+# Daemon Serves UI From Disk — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** The `logos` daemon serves the SvelteKit SPA from its own binary on `:7777` alongside `/api/v1/*`, gated behind a `-Dembed-ui` build option (default false) so the test suite + backend dev stay node-free while CI/release builds embed the UI into one self-contained binary.
+**Goal:** The `logos` daemon serves the SvelteKit SPA from a `ui/` directory on disk (default `<exe_dir>/ui`, override `CHARGESHEET_UI_DIR`) alongside `/api/v1/*`, with SPA fallback to `index.html` and a path-traversal guard. No embedding, no build changes, daemon build stays node-free.
 
-**Architecture:** A pure `src/api/static.zig` unit owns asset lookup + MIME + the serve-vs-fallback decision (unit-tested with a fake map, no browser/build needed). `build.zig` always wires an `assets` named import onto the exe module — an empty committed stub when `embed-ui=false`, or a build-time-generated manifest (`yarn build` → a generator walks the output → emits `manifest.zig` that `@embedFile`s each asset) when `embed-ui=true`. `server.zig` routes unmatched GET non-`/api` paths through `static` with SPA fallback to `index.html`.
+**Architecture:** A pure-ish `src/api/static.zig` resolves a request path to a file under `ui_dir` (MIME by extension, `..`-traversal guard, SPA fallback), unit-tested against a `std.testing.tmpDir` fixture. `config.zig` resolves `ui_dir` at startup. `server.zig` routes unmatched GET non-`/api` paths through `static.resolve` and reads the file from disk (the existing `readFileAlloc` pattern). `build.zig` is untouched.
 
-**Tech Stack:** Zig 0.16 (`b.option`, `b.addOptions`, `addRunArtifact`, `@embedFile`, `std.StaticStringMap`), the existing logos HTTP server, the `chargesheet-ui` SvelteKit `adapter-static` SPA. Spec: `docs/superpowers/specs/2026-05-27-daemon-serves-ui-design.md`.
+**Tech Stack:** Zig 0.16 (`std.fs`/`std.Io.Dir`, `std.testing.tmpDir`, `std.fs.path`), the existing logos HTTP server. Spec: `docs/superpowers/specs/2026-05-27-daemon-serves-ui-design.md`.
 
-**Branch:** Work happens on `feat/daemon-serves-ui` (already created; spec committed there).
+**Branch:** `feat/daemon-serves-ui` (spec + this plan committed there; this revises the earlier embed-based versions).
 
 ---
 
@@ -16,67 +16,82 @@
 
 ```
 logos/
-├── build.zig                # MODIFIED: -Dembed-ui option, build_options, wire `assets` import (stub or generated)
-├── src/api/
-│   ├── static.zig           # NEW: Asset, MIME table, lookup/resolve (pure) + unit tests
-│   ├── assets_empty.zig     # NEW: committed empty-map stub (used when embed-ui=false)
-│   └── server.zig           # MODIFIED: route unmatched GET non-/api through static + SPA fallback
-├── src/main.zig             # MODIFIED: add static + assets to the test-discovery block
-└── tools/
-    └── gen_assets.zig       # NEW (Task 2): build-time generator — walks the yarn build dir, emits manifest.zig
+├── src/
+│   ├── config.zig          # MODIFIED: add ui_dir (CHARGESHEET_UI_DIR or <exe_dir>/ui)
+│   ├── api/
+│   │   ├── static.zig      # NEW: resolve(io,gpa,ui_dir,is_get,path) + mime + traversal guard + tests
+│   │   └── server.zig      # MODIFIED: ServeOptions.ui_dir; dispatch not_found→static; respondFile/respondUiPlaceholder
+│   └── main.zig            # MODIFIED: pass config.ui_dir into serve(); add static to test discovery
 ```
 
-Boundaries: `static.zig` is pure (map → response decision), independently testable. `assets_empty.zig` / the generated manifest are interchangeable providers of `pub const map: std.StaticStringMap([]const u8)`. `gen_assets.zig` is a standalone build tool. `server.zig` only gains a dispatch arm.
-
-Conventions: established logos patterns — `std.Io.Writer.fixed`, `request.respond(body, .{ .status, .extra_headers })`, `cors_headers`, exhaustive switches. No `@cImport`. Tests via `std.testing` pulled into discovery from `main.zig`'s `test {}` block.
+`build.zig` and `build.zig.zon` are **unchanged**. Boundaries: `static.zig` owns path→file resolution (testable against a temp dir); `config.zig` owns dir resolution; `server.zig` owns HTTP read+respond. Conventions: existing logos patterns (`std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(...))` from the chargesheet handler; `request.respond(body, .{...})`; `cors_headers`; exhaustive switches; `std.testing.tmpDir` from `project_dir.zig` tests).
 
 ---
 
-### Task 1: `static.zig` + `-Dembed-ui` option + stub + routing (node-free, fully tested)
+### Task 1: `config.ui_dir` + `static.zig` (resolve/mime/traversal) + server dispatch
 
-Everything except the actual `yarn build` embed. Delivers the node-free default path, the complete static-serving logic under unit test, and the daemon serving a placeholder at `/`.
+The whole feature except verifying with the real built UI. Node-free, TDD on the resolver.
 
 **Files:**
+- Modify: `src/config.zig`
 - Create: `src/api/static.zig`
-- Create: `src/api/assets_empty.zig`
-- Modify: `build.zig`
 - Modify: `src/api/server.zig`
 - Modify: `src/main.zig`
 
-- [ ] **Step 1: Create the empty-map stub `src/api/assets_empty.zig`**
+- [ ] **Step 1: Add `ui_dir` to `AppConfig` in `src/config.zig`**
+
+Read the current `config.zig` first (it has `data_dir`, `load(gpa, env)`, `deinit`). Add a `ui_dir` field resolved from `CHARGESHEET_UI_DIR` or `<exe_dir>/ui`:
 
 ```zig
-//! Empty asset map — used when the daemon is built without -Dembed-ui.
-//! The generated manifest (Task 2) exposes the same `map` symbol when embedding.
-const std = @import("std");
+pub const AppConfig = struct {
+    data_dir: []u8,
+    ui_dir: []u8,
 
-pub const map = std.StaticStringMap([]const u8).initComptime(.{});
+    pub fn load(gpa: std.mem.Allocator, env: *const std.process.Environ.Map) !AppConfig {
+        const data_dir = try paths.getAppDataDir(gpa, env);
+        errdefer gpa.free(data_dir);
+        const ui_dir = try resolveUiDir(gpa, env);
+        return .{ .data_dir = data_dir, .ui_dir = ui_dir };
+    }
+
+    pub fn deinit(self: *AppConfig, gpa: std.mem.Allocator) void {
+        gpa.free(self.data_dir);
+        gpa.free(self.ui_dir);
+    }
+};
+
+/// CHARGESHEET_UI_DIR if set, else the directory containing the running
+/// executable + "/ui". Caller owns the returned slice.
+fn resolveUiDir(gpa: std.mem.Allocator, env: *const std.process.Environ.Map) ![]u8 {
+    if (env.get("CHARGESHEET_UI_DIR")) |v| {
+        if (v.len > 0) return gpa.dupe(u8, v);
+    }
+    const exe_dir = try std.fs.selfExeDirPathAlloc(gpa);
+    defer gpa.free(exe_dir);
+    return std.fs.path.join(gpa, &.{ exe_dir, "ui" });
+}
 ```
 
-- [ ] **Step 2: Write `src/api/static.zig` with tests FIRST (TDD)**
+NOTE: `std.fs.selfExeDirPathAlloc(gpa)` is the historical API; in Zig 0.16 the exe-dir helper may live under `std.fs` or require `std.Io`. Verify against the stdlib (`grep -rn "selfExeDir" ~/.zvm/0.16.0/lib/std`) and use the correct 0.16 call; the contract is "absolute path of the directory containing the running binary." The `env` type (`*const std.process.Environ.Map`) must match what `load` already takes — keep it identical to the existing signature.
+
+- [ ] **Step 2: Write `src/api/static.zig` with tests FIRST**
 
 ```zig
-//! Static web-asset serving: maps request paths to embedded bytes + MIME,
-//! with SPA fallback to index.html. Pure logic — the asset map is injected
-//! (via the `assets` module in prod, or a fixture in tests).
+//! Serve the web UI's static files from a directory on disk, with MIME by
+//! extension, SPA fallback to index.html, and a path-traversal guard.
 const std = @import("std");
-const assets = @import("assets"); // provides `pub const map: std.StaticStringMap([]const u8)`
 
-pub const Asset = struct {
-    bytes: []const u8,
-    mime: []const u8,
+pub const Served = union(enum) {
+    /// Serve this file: read abs_path, respond 200 with `mime`. Caller frees abs_path.
+    file: struct { abs_path: []u8, mime: []const u8 },
+    /// No UI present (ui_dir missing / no index.html) — serve the dev placeholder.
+    placeholder,
+    /// Not a static concern (/api/* or non-GET) — caller decides (404 / API).
+    not_handled,
 };
 
-/// What the server should do with a request, from the static layer's POV.
-pub const Resolution = union(enum) {
-    asset: Asset, // serve these bytes + mime, 200
-    placeholder, // embed-ui=false (empty map): serve the dev note
-    not_handled, // not a static concern (e.g. /api/* or non-GET) — caller decides (404/api)
-};
-
-/// MIME for a path's extension. Covers what a SvelteKit `adapter-static` build emits.
 pub fn mimeForPath(path: []const u8) []const u8 {
-    const ext = std.fs.path.extension(path); // includes the dot, e.g. ".js"
+    const ext = std.fs.path.extension(path);
     if (std.mem.eql(u8, ext, ".html")) return "text/html";
     if (std.mem.eql(u8, ext, ".js")) return "text/javascript";
     if (std.mem.eql(u8, ext, ".css")) return "text/css";
@@ -90,363 +105,305 @@ pub fn mimeForPath(path: []const u8) []const u8 {
     return "application/octet-stream";
 }
 
-/// Pure resolution against an injected map — the unit-tested core.
-pub fn resolveIn(m: std.StaticStringMap([]const u8), method_is_get: bool, path: []const u8) Resolution {
-    if (!method_is_get) return .not_handled;
-    if (std.mem.startsWith(u8, path, "/api/")) return .not_handled;
-    if (m.values().len == 0) return .placeholder;
-
-    const key = if (std.mem.eql(u8, path, "/")) "/index.html" else path;
-    if (m.get(key)) |bytes| return .{ .asset = .{ .bytes = bytes, .mime = mimeForPath(key) } };
-    // SPA fallback: any other GET path serves index.html for client-side routing.
-    if (m.get("/index.html")) |bytes| return .{ .asset = .{ .bytes = bytes, .mime = "text/html" } };
-    return .placeholder;
+/// A URL path is safe iff none of its '/'-separated components is "", ".", or
+/// "..", and it contains no '\' or NUL. Leading '/' is expected and ignored.
+fn isSafeUrlPath(path: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, path, '\\') != null) return false;
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return false;
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next()) |seg| {
+        if (std.mem.eql(u8, seg, ".") or std.mem.eql(u8, seg, "..")) return false;
+    }
+    return true;
 }
 
-/// Production entry point — resolves against the build-provided asset map.
-pub fn resolve(method_is_get: bool, path: []const u8) Resolution {
-    return resolveIn(assets.map, method_is_get, path);
+/// Does `<dir>/<rel>` exist as a regular file?
+fn fileExists(io: std.Io, dir: []const u8, rel: []const u8, gpa: std.mem.Allocator) !?[]u8 {
+    const abs = try std.fs.path.join(gpa, &.{ dir, rel });
+    errdefer gpa.free(abs);
+    const f = std.Io.Dir.cwd().openFile(io, abs, .{ .mode = .read_only }) catch {
+        gpa.free(abs);
+        return null;
+    };
+    f.close(io);
+    return abs; // caller owns
+}
+
+/// Resolve a request to a static file under `ui_dir`, with SPA fallback.
+pub fn resolve(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    ui_dir: []const u8,
+    method_is_get: bool,
+    path: []const u8,
+) !Served {
+    if (!method_is_get) return .not_handled;
+    if (std.mem.startsWith(u8, path, "/api/")) return .not_handled;
+
+    // ui_dir present?
+    var d = std.Io.Dir.cwd().openDir(io, ui_dir, .{}) catch return .placeholder;
+    d.close(io);
+
+    // Try the exact (safe) file.
+    if (isSafeUrlPath(path)) {
+        const rel = if (std.mem.eql(u8, path, "/")) "index.html" else std.mem.trimLeft(u8, path, "/");
+        if (try fileExists(io, ui_dir, rel, gpa)) |abs| {
+            return .{ .file = .{ .abs_path = abs, .mime = mimeForPath(rel) } };
+        }
+    }
+
+    // SPA fallback (also covers unsafe paths → never serves outside ui_dir).
+    if (try fileExists(io, ui_dir, "index.html", gpa)) |abs| {
+        return .{ .file = .{ .abs_path = abs, .mime = "text/html" } };
+    }
+    return .placeholder;
 }
 
 const testing = std.testing;
 
-const fake_map = std.StaticStringMap([]const u8).initComptime(.{
-    .{ "/index.html", "<!doctype html><body>app</body>" },
-    .{ "/_app/immutable/app.js", "console.log(1)" },
-    .{ "/favicon.png", "PNGDATA" },
-    .{ "/styles.css", "body{}" },
-});
+fn writeFixture(io: std.Io, dir: std.Io.Dir, rel: []const u8, bytes: []const u8) !void {
+    if (std.fs.path.dirname(rel)) |sub| try dir.makePath(io, sub);
+    var f = try dir.createFile(io, rel, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, bytes);
+}
 
-test "mimeForPath covers the SvelteKit set" {
-    try testing.expectEqualStrings("text/html", mimeForPath("/index.html"));
+test "static.resolve against a fixture ui dir" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Build the cwd-relative path to the tmp dir (matches project_dir.zig test pattern).
+    const ui_dir = try std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    defer gpa.free(ui_dir);
+
+    try writeFixture(io, tmp.dir, "index.html", "<!doctype html>app");
+    try writeFixture(io, tmp.dir, "_app/immutable/app.js", "console.log(1)");
+    try writeFixture(io, tmp.dir, "styles.css", "body{}");
+
+    // exact hit
+    {
+        var r = try resolve(io, gpa, ui_dir, true, "/_app/immutable/app.js");
+        try testing.expect(r == .file);
+        defer gpa.free(r.file.abs_path);
+        try testing.expectEqualStrings("text/javascript", r.file.mime);
+    }
+    // root → index.html
+    {
+        var r = try resolve(io, gpa, ui_dir, true, "/");
+        try testing.expect(r == .file);
+        defer gpa.free(r.file.abs_path);
+        try testing.expectEqualStrings("text/html", r.file.mime);
+    }
+    // unknown → SPA fallback to index.html
+    {
+        var r = try resolve(io, gpa, ui_dir, true, "/projects/abc");
+        try testing.expect(r == .file);
+        defer gpa.free(r.file.abs_path);
+        try testing.expect(std.mem.endsWith(u8, r.file.abs_path, "index.html"));
+    }
+    // /api → not_handled
+    try testing.expect((try resolve(io, gpa, ui_dir, true, "/api/v1/health")) == .not_handled);
+    // non-GET → not_handled
+    try testing.expect((try resolve(io, gpa, ui_dir, false, "/")) == .not_handled);
+    // traversal → never escapes ui_dir (falls back to index.html within ui_dir)
+    {
+        var r = try resolve(io, gpa, ui_dir, true, "/../../../etc/passwd");
+        try testing.expect(r == .file);
+        defer gpa.free(r.file.abs_path);
+        try testing.expect(std.mem.endsWith(u8, r.file.abs_path, "index.html"));
+        try testing.expect(std.mem.indexOf(u8, r.file.abs_path, "etc/passwd") == null);
+    }
+}
+
+test "static.resolve with missing ui dir → placeholder" {
+    const gpa = testing.allocator;
+    try testing.expect((try resolve(testing.io, gpa, "/nonexistent/ui/dir/xyz", true, "/")) == .placeholder);
+}
+
+test "mimeForPath coverage" {
     try testing.expectEqualStrings("text/javascript", mimeForPath("/x.js"));
-    try testing.expectEqualStrings("text/css", mimeForPath("/x.css"));
     try testing.expectEqualStrings("image/png", mimeForPath("/favicon.png"));
     try testing.expectEqualStrings("application/octet-stream", mimeForPath("/weird.xyz"));
 }
-
-test "resolveIn: exact asset hit returns bytes + mime" {
-    const r = resolveIn(fake_map, true, "/_app/immutable/app.js");
-    try testing.expect(r == .asset);
-    try testing.expectEqualStrings("console.log(1)", r.asset.bytes);
-    try testing.expectEqualStrings("text/javascript", r.asset.mime);
-}
-
-test "resolveIn: root normalizes to index.html" {
-    const r = resolveIn(fake_map, true, "/");
-    try testing.expect(r == .asset);
-    try testing.expectEqualStrings("<!doctype html><body>app</body>", r.asset.bytes);
-    try testing.expectEqualStrings("text/html", r.asset.mime);
-}
-
-test "resolveIn: unknown path falls back to index.html (SPA)" {
-    const r = resolveIn(fake_map, true, "/projects/abc123");
-    try testing.expect(r == .asset);
-    try testing.expectEqualStrings("<!doctype html><body>app</body>", r.asset.bytes);
-    try testing.expectEqualStrings("text/html", r.asset.mime);
-}
-
-test "resolveIn: /api paths are not_handled (left to the API/404)" {
-    try testing.expect(resolveIn(fake_map, true, "/api/v1/health") == .not_handled);
-}
-
-test "resolveIn: non-GET is not_handled" {
-    try testing.expect(resolveIn(fake_map, false, "/") == .not_handled);
-}
-
-test "resolveIn: empty map returns placeholder" {
-    const empty = std.StaticStringMap([]const u8).initComptime(.{});
-    try testing.expect(resolveIn(empty, true, "/") == .placeholder);
-}
 ```
 
-NOTE: `m.values().len` is the way to test emptiness on `std.StaticStringMap` in 0.16; if that field/method differs, use whatever exposes the entry count (e.g. `m.keys().len`). Verify against `lib/std/static_string_map.zig`.
+NOTE: verify the 0.16 stdlib calls against existing project code — `std.testing.tmpDir`, `tmp.sub_path`, `std.Io.Dir.cwd().openFile/openDir`, `dir.createFile`, `f.writeStreamingAll`, `dir.makePath` all appear in `src/storage/project_dir.zig` (and its tests) and `src/lock.zig`; mirror those exact signatures. The `.zig-cache/tmp/<sub_path>` reconstruction is the proven pattern from `project_dir.zig` tests. If `tokenizeScalar`/`trimLeft` names differ, adapt.
 
-- [ ] **Step 3: Wire `-Dembed-ui`, `build_options`, and the `assets` import in `build.zig`**
+- [ ] **Step 3: Run static tests**
 
-In `build()`, after `target`/`optimize`:
+Add `_ = @import("api/static.zig");` to `src/main.zig`'s `test {}` block, then:
+```bash
+cd /Users/user/projects/lambe-haath/logos
+zig build test --summary all 2>&1 | grep -E "tests passed|error"
+```
+Expected: 75 prior + 3 new static tests = **78/78**, node-free.
 
+- [ ] **Step 4: Wire `ui_dir` through `ServeOptions` + dispatch in `src/api/server.zig`**
+
+Add import: `const static = @import("static.zig");`
+
+Add `ui_dir` to `ServeOptions`:
 ```zig
-const embed_ui = b.option(bool, "embed-ui", "Build + embed the chargesheet-ui SPA into the daemon (requires node/yarn)") orelse false;
-
-const build_opts = b.addOptions();
-build_opts.addOption(bool, "embed_ui", embed_ui);
-
-// The `assets` module: empty stub by default; Task 2 replaces this branch with the generated manifest when embed_ui.
-const assets_mod = b.createModule(.{
-    .root_source_file = b.path("src/api/assets_empty.zig"),
-    .target = target,
-    .optimize = optimize,
-});
+pub const ServeOptions = struct {
+    port: u16,
+    version: []const u8,
+    data_dir: []const u8,
+    ui_dir: []const u8,
+};
 ```
 
-Add both to the exe's root module imports (alongside `logos`, `zqlite`, `mupdf`):
-
-```zig
-.imports = &.{
-    .{ .name = "logos", .module = mod },
-    .{ .name = "zqlite", .module = zqlite_dep.module("zqlite") },
-    .{ .name = "mupdf", .module = mupdf_zig_dep.module("mupdf") },
-    .{ .name = "assets", .module = assets_mod },
-    .{ .name = "build_options", .module = build_opts.createModule() },
-},
-```
-
-The exe's test executable (`exe_tests`, root_module = `exe.root_module`) inherits these imports, so `static.zig`'s `@import("assets")` + the daemon's `@import("build_options")` resolve in tests too (with the empty stub).
-
-- [ ] **Step 4: Add static dispatch + placeholder to `src/api/server.zig`**
-
-Add the import at the top:
-```zig
-const static = @import("static.zig");
-```
-
-In `serveRequest`'s switch, replace the `.not_found => respondNotFound(gpa, request)` arm so unmatched GET non-`/api` paths try static:
-
+Replace the `.not_found` switch arm:
 ```zig
 .not_found => {
-    switch (static.resolve(request.head.method == .GET, target)) {
-        .asset => |a| try respondAsset(request, a),
-        .placeholder => try respondUiPlaceholder(request),
+    const served = static.resolve(io, gpa, opts.ui_dir, request.head.method == .GET, target) catch
+        return respondNotFound(gpa, request);
+    switch (served) {
+        .file => |f| {
+            defer gpa.free(f.abs_path);
+            try respondFile(io, gpa, request, f.abs_path, f.mime);
+        },
+        .placeholder => try respondUiPlaceholder(request, opts.ui_dir),
         .not_handled => try respondNotFound(gpa, request),
     }
 },
 ```
 
-(All the other arms — health, cors_preflight, projects_*, jobs_*, slices_* — stay exactly as they are.)
-
-Add the two responders:
-
+Add the responders (reuse the chargesheet read pattern):
 ```zig
-fn respondAsset(request: *http.Server.Request, a: static.Asset) !void {
+fn respondFile(io: std.Io, gpa: std.mem.Allocator, request: *http.Server.Request, abs_path: []const u8, mime: []const u8) !void {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, abs_path, gpa, .limited(100 * 1024 * 1024)) catch
+        return respondNotFound(gpa, request);
+    defer gpa.free(bytes);
     const headers = [_]std.http.Header{
-        .{ .name = "Content-Type", .value = a.mime },
+        .{ .name = "Content-Type", .value = mime },
     } ++ cors_headers;
-    try request.respond(a.bytes, .{ .status = .ok, .extra_headers = &headers });
+    try request.respond(bytes, .{ .status = .ok, .extra_headers = &headers });
 }
 
-fn respondUiPlaceholder(request: *http.Server.Request) !void {
-    const body =
-        "logos daemon is running. The web UI is not embedded in this build.\n" ++
-        "Build with -Dembed-ui=true, or run the dev UI: cd chargesheet-ui && yarn dev (http://localhost:5173).\n";
+fn respondUiPlaceholder(request: *http.Server.Request, ui_dir: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.print(
+        "logos daemon is running, but no web UI was found at:\n  {s}\n\n" ++
+        "Build it (cd chargesheet-ui && yarn build) and set CHARGESHEET_UI_DIR to that build/ dir,\n" ++
+        "or run the dev UI: cd chargesheet-ui && yarn dev (http://localhost:5173).\n",
+        .{ui_dir},
+    );
     const headers = [_]std.http.Header{
         .{ .name = "Content-Type", .value = "text/plain" },
     } ++ cors_headers;
-    try request.respond(body, .{ .status = .ok, .extra_headers = &headers });
+    try request.respond(w.buffered(), .{ .status = .ok, .extra_headers = &headers });
 }
 ```
 
-- [ ] **Step 5: Add static tests to discovery in `src/main.zig`**
+`io` is already a parameter of `serveRequest` (threaded in Phase 8b). `readFileAlloc` / `.limited(...)` matches the chargesheet handler — verify the exact call there and mirror it.
 
-In the trailing `test {}` block, add:
+- [ ] **Step 5: Pass `config.ui_dir` from `src/main.zig`**
+
+Find the `api_server.serve(io, gpa, &db, .{ ... })` call and add `.ui_dir = config.data_dir`-style field:
 ```zig
-    _ = @import("api/static.zig");
+try api_server.serve(io, gpa, &db, .{
+    .port = port,
+    .version = version,
+    .data_dir = config.data_dir,
+    .ui_dir = config.ui_dir,
+});
 ```
 
-- [ ] **Step 6: Build + run tests (node-free default)**
+- [ ] **Step 6: Build + full test run + placeholder smoke**
 
 ```bash
 cd /Users/user/projects/lambe-haath/logos
-zig build test --summary all 2>&1 | grep -E "tests passed|error"
-```
-Expected: 75 prior + 7 new static tests = **82/82**, with NO yarn/node invoked (default `embed-ui=false`).
-
-- [ ] **Step 7: Smoke-test the placeholder path**
-
-```bash
+zig build test --summary all 2>&1 | grep -E "tests passed"   # 78/78, node-free
 zig build
-CHARGESHEET_DATA_DIR=/tmp/logos-ui-stub rm -rf /tmp/logos-ui-stub
-CHARGESHEET_DATA_DIR=/tmp/logos-ui-stub ./zig-out/bin/logos -p 7777 &
+CHARGESHEET_DATA_DIR=/tmp/logos-ui-disk rm -rf /tmp/logos-ui-disk
+CHARGESHEET_DATA_DIR=/tmp/logos-ui-disk CHARGESHEET_UI_DIR=/tmp/definitely-no-ui ./zig-out/bin/logos -p 7777 &
 P=$!; sleep 1
-echo "=== / (placeholder) ==="; curl -s -i http://localhost:7777/ | head -8
+echo "=== / placeholder ==="; curl -s -i http://localhost:7777/ | head -8
 echo "=== /api/v1/health still JSON ==="; curl -s http://localhost:7777/api/v1/health
 echo "=== /api unknown still JSON 404 ==="; curl -s -i http://localhost:7777/api/v1/nope | head -1
 kill $P; wait $P 2>/dev/null
 ```
-Expected: `/` → 200 text/plain placeholder note; `/api/v1/health` → `{"status":"ok",...}`; `/api/v1/nope` → 404 JSON (NOT the placeholder — `/api/*` is `not_handled` by static, so it still hits `respondNotFound`).
+Expected: `/` → 200 text/plain placeholder naming the missing dir; health → JSON; `/api/v1/nope` → 404 JSON (NOT the placeholder).
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 cd /Users/user/projects/lambe-haath
-git add logos/src/api/static.zig logos/src/api/assets_empty.zig logos/build.zig logos/src/api/server.zig logos/src/main.zig
-git commit -m "feat(api): static asset serving + -Dembed-ui option (empty stub default)"
+git add logos/src/config.zig logos/src/api/static.zig logos/src/api/server.zig logos/src/main.zig
+git commit -m "feat(api): serve web UI from disk (ui_dir, MIME, SPA fallback, traversal guard)"
 ```
 
 ---
 
-### Task 2: `yarn build` → embed the real UI (`-Dembed-ui=true`)
+### Task 2: Verify serving the real built UI from disk
 
-The build-time generator + wiring that turns the SvelteKit build into the `assets` module. Verified by serving the real SPA.
+No code — prove the daemon serves the actual SvelteKit build, end to end.
 
-**Files:**
-- Create: `tools/gen_assets.zig`
-- Modify: `build.zig`
+- [ ] **Step 1: Build the UI**
 
-- [ ] **Step 1: Write the generator `tools/gen_assets.zig`**
-
-A standalone Zig program: argv = `<input-build-dir> <output-dir>`. It recursively copies every file from the SvelteKit build dir into `<output-dir>` (preserving relative paths) and writes `<output-dir>/manifest.zig` exposing `pub const map` — a `StaticStringMap` of request-path → `@embedFile(<relative-path>)`. Because the manifest AND the assets live in the same output dir, `@embedFile` resolves relative to the manifest when the daemon compiles it.
-
-```zig
-const std = @import("std");
-
-pub fn main() !void {
-    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var args = try std.process.argsAlloc(arena);
-    if (args.len != 3) {
-        std.debug.print("usage: gen_assets <input-build-dir> <output-dir>\n", .{});
-        std.process.exit(2);
-    }
-    const in_dir_path = args[1];
-    const out_dir_path = args[2];
-
-    var in_dir = try std.fs.cwd().openDir(in_dir_path, .{ .iterate = true });
-    defer in_dir.close();
-    try std.fs.cwd().makePath(out_dir_path);
-    var out_dir = try std.fs.cwd().openDir(out_dir_path, .{});
-    defer out_dir.close();
-
-    // Collect relative file paths.
-    var rels = std.ArrayList([]const u8){};
-    var walker = try in_dir.walk(arena);
-    defer walker.deinit();
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
-        const rel = try arena.dupe(u8, entry.path); // path relative to in_dir
-        // copy file into out_dir preserving structure
-        if (std.fs.path.dirname(rel)) |d| try out_dir.makePath(d);
-        try in_dir.copyFile(rel, out_dir, rel, .{});
-        try rels.append(arena, rel);
-    }
-
-    // Write manifest.zig.
-    var manifest = try out_dir.createFile("manifest.zig", .{});
-    defer manifest.close();
-    var buf: [4096]u8 = undefined;
-    var fw = manifest.writer(&buf); // adapt to 0.16 File.writer signature
-    const w = &fw.interface;
-    try w.writeAll("const std = @import(\"std\");\npub const map = std.StaticStringMap([]const u8).initComptime(.{\n");
-    for (rels.items) |rel| {
-        // request path: "/" + rel, with backslashes normalized to "/"
-        try w.writeAll("    .{ \"/");
-        for (rel) |c| try w.writeByte(if (c == '\\') '/' else c);
-        try w.writeAll("\", @embedFile(\"");
-        for (rel) |c| try w.writeByte(if (c == '\\') '/' else c);
-        try w.writeAll("\") },\n");
-    }
-    try w.writeAll("});\n");
-    try w.flush();
-}
+```bash
+cd /Users/user/projects/lambe-haath/chargesheet-ui
+yarn install --frozen-lockfile 2>&1 | tail -2
+yarn build 2>&1 | tail -5
+ls build/ | head   # expect index.html, _app/, favicon.png, etc.
 ```
 
-NOTE: the `std.ArrayList`/`File.writer`/`Dir.walk`/`copyFile` calls are Zig-0.16-sensitive. Verify each against the stdlib and adapt: `std.ArrayList([]const u8){}` may need `= .empty`; `manifest.writer(&buf)` returns a `File.Writer` whose `.interface` is the `*std.Io.Writer` (mirror the pattern already used in `logos/src/lock.zig` / wherever the project writes files). The contract: copy all files + emit a compilable `manifest.zig` with one `@embedFile` per file, keyed by URL path.
-
-- [ ] **Step 2: Wire the embed path in `build.zig`**
-
-Replace the Task-1 `assets_mod` block with a conditional: stub when `!embed_ui`, generated manifest when `embed_ui`.
-
-```zig
-const assets_mod = blk: {
-    if (!embed_ui) {
-        break :blk b.createModule(.{
-            .root_source_file = b.path("src/api/assets_empty.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-    }
-
-    // 1. yarn build → chargesheet-ui/build
-    const yarn = b.addSystemCommand(&.{ "yarn", "--cwd", "chargesheet-ui", "build" });
-    // (If yarn isn't found, the build fails loudly — intended: embed-ui requires node/yarn.)
-
-    // 2. Run the generator: gen_assets <build-dir> <out-dir>
-    const gen_exe = b.addExecutable(.{
-        .name = "gen_assets",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/gen_assets.zig"),
-            .target = b.graph.host, // generator runs on the BUILD host, not the cross target
-            .optimize = .Debug,
-        }),
-    });
-    const gen = b.addRunArtifact(gen_exe);
-    gen.step.dependOn(&yarn.step); // generator runs after yarn build
-    gen.addArg(b.pathFromRoot("chargesheet-ui/build")); // input dir (produced by yarn)
-    const out = gen.addOutputDirectoryArg("ui-assets"); // make-dependent LazyPath to the generated dir
-
-    break :blk b.createModule(.{
-        .root_source_file = out.path(b, "manifest.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-};
-```
-
-Key points the implementer must get right (mirror the proven MuPDF make-step pattern from `mupdf-zig/build.zig`):
-- `gen.addOutputDirectoryArg("ui-assets")` returns a `LazyPath` that **carries a dependency on the generator Run step**, so the daemon's compile waits for generation. The manifest module's `root_source_file = out.path(b, "manifest.zig")` inherits that dependency — no manual `dependOn` on the exe needed.
-- The generator exe targets `b.graph.host` (runs on the build machine), independent of the daemon's cross-compile target.
-- `yarn --cwd chargesheet-ui build` writes to `chargesheet-ui/build`; pass that as the generator's input. (If yarn's `--cwd` flag differs, use `cd chargesheet-ui && yarn build` via a shell, or `b.addSystemCommand` with `setCwd`.) Verify yarn is the right invocation (`yarn build` per package.json scripts).
-
-- [ ] **Step 3: Build with the UI embedded**
+- [ ] **Step 2: Run the daemon pointed at the build dir**
 
 ```bash
 cd /Users/user/projects/lambe-haath/logos
-# ensure UI deps are installed once (build machine only):
-( cd ../chargesheet-ui && yarn install --frozen-lockfile 2>&1 | tail -2 )
-zig build -Dembed-ui=true 2>&1 | tail -20
-```
-Expected: yarn build runs, gen_assets emits the manifest, the daemon links with the embedded assets. Clean build.
-
-- [ ] **Step 4: Smoke-test serving the real UI**
-
-```bash
 CHARGESHEET_DATA_DIR=/tmp/logos-ui-real rm -rf /tmp/logos-ui-real
-CHARGESHEET_DATA_DIR=/tmp/logos-ui-real ./zig-out/bin/logos -p 7777 &
+CHARGESHEET_DATA_DIR=/tmp/logos-ui-real \
+CHARGESHEET_UI_DIR="$HOME/projects/lambe-haath/chargesheet-ui/build" \
+  ./zig-out/bin/logos -p 7777 &
 P=$!; sleep 1
+
 echo "=== / returns SvelteKit HTML ==="; curl -s http://localhost:7777/ | head -c 200; echo
-echo "=== an app JS asset ==="; curl -s -i "$(curl -s http://localhost:7777/ | grep -oE '/_app/[^"]+\.js' | head -1)" -o /dev/null -w "%{http_code} %{content_type}\n" --url "http://localhost:7777$(curl -s http://localhost:7777/ | grep -oE '/_app/[^\"]+\.js' | head -1)"
-echo "=== deep link returns index.html (SPA) ==="; curl -s http://localhost:7777/projects/xyz | head -c 60; echo
+echo "=== an _app JS asset 200 + mime ==="
+ASSET=$(curl -s http://localhost:7777/ | grep -oE '/_app/[^"]+\.js' | head -1)
+echo "asset: $ASSET"; curl -s -o /dev/null -w "%{http_code} %{content_type}\n" "http://localhost:7777$ASSET"
+echo "=== deep link → index.html (SPA) ==="; curl -s http://localhost:7777/projects/xyz | head -c 60; echo
 echo "=== /api/v1/health still JSON ==="; curl -s http://localhost:7777/api/v1/health
+echo "=== traversal blocked ==="; curl -s -o /dev/null -w "%{http_code}\n" "http://localhost:7777/../../../etc/passwd"
 kill $P; wait $P 2>/dev/null
 ```
-Expected: `/` → SvelteKit HTML (`<!doctype html>...`); the `_app/*.js` asset → `200 text/javascript`; `/projects/xyz` → the same index.html (SPA fallback); `/api/v1/health` → JSON. Then open `http://localhost:7777` in a browser and confirm the app loads and drives the API (create/list a project) entirely from the daemon — no `yarn dev` running.
+Expected: `/` → `<!doctype html>...`; the `_app/*.js` → `200 text/javascript`; `/projects/xyz` → index.html; health → JSON; the traversal path returns 200 (index.html via fallback) and never `/etc/passwd` contents.
 
-- [ ] **Step 5: Confirm the default build is still node-free**
+- [ ] **Step 3: Browser check**
 
-```bash
-zig build test --summary all 2>&1 | grep -E "tests passed"  # 82/82, no yarn invoked
-```
+Open `http://localhost:7777` in a browser. Confirm the app loads and drives the API (create/list a project) entirely from the daemon — with NO `yarn dev` running. Note the result.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Document the run command**
 
+Append to `docs/superpowers/research/2026-05-27-zig-packaging-research.md` a short note under a "## Daemon-serves-UI (disk)" heading: the daemon serves the UI from `CHARGESHEET_UI_DIR` (default `<exe_dir>/ui`); the installer (#3) builds the UI and places it at `<exe_dir>/ui`. Commit:
 ```bash
 cd /Users/user/projects/lambe-haath
-git add logos/tools/gen_assets.zig logos/build.zig
-git commit -m "feat(api): embed + serve the SvelteKit UI under -Dembed-ui=true"
+git add logos/docs/superpowers/research/2026-05-27-zig-packaging-research.md
+git commit -m "docs: note daemon-serves-UI-from-disk run command for installer phase"
 ```
 
 ---
 
 ## Acceptance Criteria
 
-- `zig build test` passes with **no node/yarn dependency** (default `embed-ui=false`): 82/82 (75 daemon + 7 static).
-- `static.resolveIn` is fully unit-tested (exact hit, root→index, SPA fallback, `/api` not-handled, non-GET not-handled, empty→placeholder) with a fixture map — no browser/build.
-- `zig build -Dembed-ui=true` runs `yarn build`, embeds the output, and the daemon serves the SPA: `/` + deep links → `index.html`, asset paths → correct bytes + MIME, `/api/*` unchanged.
-- The `-Dembed-ui=true` binary is one self-contained file (no UI directory needed at runtime).
-- Default (stub) build serves the placeholder note at `/` and leaves `/api/*` behavior identical.
+- `zig build test` passes node-free; `static.resolve` unit-tested incl. exact hit, root→index, SPA fallback, `/api` not-handled, non-GET not-handled, traversal-blocked, missing-dir→placeholder.
+- Daemon with `CHARGESHEET_UI_DIR` → built `build/` serves the SPA: `/` + deep links → index.html, assets → correct bytes + MIME, `/api/*` unchanged.
+- A traversal request never reads outside `ui_dir`.
+- No `ui/` present → placeholder note; API still works.
+- `build.zig` unchanged; no node dependency in the daemon build.
 
 ## Self-Review
 
-**1. Spec coverage:** `-Dembed-ui` option + default-false (Task 1 Step 3) ✓; `static.zig` with MIME + lookup (Task 1 Step 2) ✓; routing + SPA fallback + placeholder (Task 1 Step 4) ✓; `yarn build` + embed via generator (Task 2) ✓; node-free test suite (Task 1 Step 6, Task 2 Step 5) ✓; unit tests not needing a browser (Task 1 Step 2) ✓; CORS retained (responders use `++ cors_headers`) ✓. The generator-after-build mechanism (the spec's one fiddly point) is Task 2 Steps 1-2 with the proven output-dir-LazyPath dependency pattern.
+**1. Spec coverage:** ui_dir resolution (Task 1 Step 1) ✓; static.zig resolve+mime+traversal (Step 2) ✓; server dispatch + respondFile + placeholder (Step 4) ✓; main wiring (Step 5) ✓; real-UI verification + traversal-blocked check (Task 2) ✓; node-free build (Steps 3,6) ✓; browser-free unit tests via tmpDir fixture (Step 2) ✓; build.zig untouched ✓.
 
-**2. Placeholder scan:** No "TBD". The Zig-0.16-sensitive calls (`StaticStringMap.values().len`, `File.writer`, `Dir.walk`, `ArrayList` init, `addOutputDirectoryArg`) are each flagged with "verify against stdlib / mirror existing project pattern" + the concrete contract — directives, not gaps. The proven precedents are cited (the MuPDF make-step output-dir-LazyPath in `mupdf-zig/build.zig`; file-writing in `lock.zig`).
+**2. Placeholder scan:** No "TBD". The 0.16-sensitive stdlib calls (`selfExeDirPathAlloc`, `tmpDir`/`sub_path`, `Io.Dir` open/create/read, `writeStreamingAll`, `readFileAlloc .limited`, `tokenizeScalar`) are each flagged "mirror the existing pattern in project_dir.zig / lock.zig / the chargesheet handler" with the concrete contract — directives citing in-repo precedents, not gaps.
 
-**3. Type consistency:** `Asset { bytes, mime }`, `Resolution` union (`asset`/`placeholder`/`not_handled`), `resolveIn`/`resolve`/`mimeForPath`, `assets.map` (StaticStringMap) — consistent between `static.zig`, `server.zig`'s dispatch, and the generated/stub modules (both expose `pub const map`). The `assets` + `build_options` named imports are wired on the exe module in Task 1 Step 3 and consumed in `static.zig`.
+**3. Type consistency:** `Served` union (`file{abs_path,mime}`/`placeholder`/`not_handled`), `resolve(io,gpa,ui_dir,is_get,path)`, `mimeForPath`, `isSafeUrlPath`, `fileExists` — consistent between static.zig and server's dispatch. `ServeOptions.ui_dir` (Step 4) ↔ `config.ui_dir` passed in main (Step 5) ↔ `AppConfig.ui_dir` (Step 1). `respondFile`/`respondUiPlaceholder` defined where used.
 
-## Deferred (later / #3)
+## Deferred (#3 / later)
 
-- CI matrix build + GitHub Releases + cross-platform install script — consumes this phase's `-Dembed-ui=true` binary.
-- Asset `Cache-Control`/`ETag`/`Content-Encoding: gzip` (SvelteKit can `precompress`) — defer until perf matters.
-- The `build_options.embed_ui` bool is wired but the daemon currently infers "no UI" from the empty map; keep the option for an explicit startup log line if desired later.
+- Installer builds the UI in CI + places it at `<exe_dir>/ui`; cross-platform install script.
+- Caching/compression headers; in-memory file caching.

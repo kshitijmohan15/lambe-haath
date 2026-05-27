@@ -1,71 +1,92 @@
-# Design: Daemon serves the embedded web UI
+# Design: Daemon serves the web UI from disk
 
-**Date:** 2026-05-27
+**Date:** 2026-05-27 (revised — switched from embed to disk-serve)
 **Status:** Approved (brainstorming) — ready for implementation plan
-**Context:** Phase toward the single-CLI product (see `docs/superpowers/research/2026-05-27-zig-packaging-research.md` and the project memory). This is "#2 — daemon serves the bundled UI." Distribution model is **Model B**: prebuilt per-platform binaries (CI builds, embeds UI, publishes; receiver downloads a binary and installs nothing). The frontend build (node/yarn) runs only in CI/dev, never on the receiver.
+**Context:** Phase "#2 — daemon serves the bundled UI" toward the single-CLI product. Distribution model is **Model B**: prebuilt per-platform binaries + the UI built in CI; the installer places both on the user's machine (user installs nothing). See `docs/superpowers/research/2026-05-27-zig-packaging-research.md`.
 
 ---
 
 ## Goal
 
-The `logos` daemon serves the SvelteKit web UI (`chargesheet-ui`) from its own binary on `:7777`, alongside the existing `/api/v1/*` — so the shipped binary is one self-contained file serving both API and UI. The user opens `http://localhost:7777` and uses the tool; no separate `yarn dev`, no static-file directory to ship.
+The `logos` daemon serves the SvelteKit SPA (`chargesheet-ui`) over HTTP on `:7777` alongside `/api/v1/*`, **reading the built UI files from a directory on disk at request time**. The installer lays the built UI next to the binary; the user opens `http://localhost:7777` and uses the tool — no separate `yarn dev`, no embedding.
 
-The UI is already a pure SPA: `adapter-static` with `fallback: 'index.html'`, `ssr=false`, `prerender=false`. `yarn build` emits a static `build/` dir; unknown routes resolve to `index.html` for client-side routing.
+The UI is a pure SPA (`adapter-static`, `fallback: 'index.html'`, `ssr=false`, `prerender=false`): `yarn build` emits a static `build/` dir; unknown routes resolve to `index.html` for client-side routing.
 
-## Build-time: `-Dembed-ui` option (default `false`)
+**Why disk-serve, not embed:** serving static files from the daemon process is the standard pattern for local/self-hosted tools (PocketBase, Gitea, Syncthing, Ollama UIs). Embedding into the binary (`@embedFile` + a generator) was considered and rejected as unnecessary build complexity — the installer can place a `ui/` directory beside the binary just as easily as a single file, and disk-serve keeps `build.zig` untouched and the daemon build node-free.
 
-`build.zig` gains a boolean option `embed-ui`, default **false**.
+## UI directory resolution
 
-- **`-Dembed-ui=true`** (CI / release builds): a build step runs `yarn build` in `chargesheet-ui/`, producing the static `build/`. A generator step then emits a Zig manifest module that `@embedFile`s every file under `build/`, exposed as a `std.StaticStringMap([]const u8)` keyed by request path (`/`, `/_app/...`, `/favicon.png`, etc.). That module is imported into the daemon. A build option (`@import("build_options").embed_ui = true`) tells the daemon assets are present.
-- **`-Dembed-ui=false`** (default — dev + the test suite): no `yarn` invocation, no embedded assets, **no node dependency**. `zig build` and `zig build test` stay node-free and fast; the existing 75-test daemon suite never acquires a node/yarn prerequisite. The daemon serves a short placeholder at `/`.
+A new `ui_dir` on `AppConfig`:
+- **Default:** the directory containing the running `logos` executable + `/ui` (i.e. `<exe_dir>/ui`). The installer drops the built UI there, beside the binary.
+- **Override:** env var `CHARGESHEET_UI_DIR` (mirrors the existing `CHARGESHEET_DATA_DIR`). Dev points it at `chargesheet-ui/build` after a `yarn build`.
 
-**Rationale for default-false:** Backend dev and CI test runs must not require node. UI dev uses the existing `yarn dev` (:5173, hot reload, Vite-proxies `/api`→:7777). The embedded UI matters only for the shipped binary, which CI builds with `-Dembed-ui=true`. This mirrors the MuPDF make-driven pattern: the heavy external-toolchain build is gated and runs only where that toolchain exists.
+Resolved once at startup in `config.zig`, alongside `data_dir`.
 
 ## Components
 
-- **`build.zig`** — `embedUi(b, target) !*std.Build.Module` helper (only wired when `embed-ui=true`): runs `yarn build` via a `Run` step in `chargesheet-ui/`, then a generator (a small Zig program run at build time, or an `addWriteFiles` that emits the manifest) produces `assets.zig` `@embedFile`-ing each built file. Returns the assets module. The `embed_ui` bool flows to the daemon via `b.addOptions()` (`build_options`).
-- **`src/api/static.zig`** — the static-serving unit. Holds:
-  - the embedded asset map (imported from the generated module when `embed_ui`, else an empty map),
-  - a hardcoded MIME table for the extensions a SvelteKit build emits: `.html→text/html`, `.js→text/javascript`, `.css→text/css`, `.json→application/json`, `.svg→image/svg+xml`, `.png→image/png`, `.ico→image/x-icon`, `.woff2→font/woff2`, `.webmanifest→application/manifest+json`, `.txt→text/plain`; default `application/octet-stream`.
-  - `pub const Asset = struct { bytes: []const u8, mime: []const u8 };`
-  - `pub fn lookup(path: []const u8) ?Asset` — exact-match asset lookup with MIME. Pure, unit-testable.
-- **`src/api/server.zig`** — dispatch gains static handling (see Routing). The static-serving decision (exact hit vs SPA fallback) lives here; `static.zig` stays a pure lookup.
+- **`src/config.zig`** — add `ui_dir: []u8` to `AppConfig`, resolved from `CHARGESHEET_UI_DIR` or `<exe_dir>/ui`.
+- **`src/api/static.zig`** (NEW) — the static-serving unit:
+  - `mimeForPath(path) []const u8` — MIME by extension (the SvelteKit set: html/js/css/json/svg/png/ico/woff2/webmanifest/txt; default `application/octet-stream`).
+  - A **path-traversal guard**: a request path must not escape `ui_dir`. Reject any path whose components include `..` (or contain `\` / NUL). A rejected/traversing path is treated as "no exact file" → SPA fallback to `index.html`, never the escaped file.
+  - `resolve(io, gpa, ui_dir, method_is_get, path) !Served` where
+    `Served = union(enum) { file: struct { abs_path: []u8, mime: []const u8 }, placeholder, not_handled }`.
+    `abs_path` is gpa-owned (caller frees). Logic below. Filesystem-touching but unit-testable against a `std.testing.tmpDir` fixture.
+- **`src/api/server.zig`** — dispatch the `not_found` arm through `static.resolve`; add `respondFile` (read bytes + serve with MIME) and `respondUiPlaceholder`. `ServeOptions` gains `ui_dir: []const u8`.
+- **`src/main.zig`** — pass `config.ui_dir` into `ServeOptions`; add `static.zig` to test discovery.
+
+`build.zig` is **unchanged** — no embedding, no build option, no node dependency. The UI is produced by `yarn build` separately and placed by the installer.
+
+## `resolve` logic
+
+1. `!method_is_get` → `.not_handled`.
+2. path starts with `/api/` → `.not_handled` (the API/404 owns it).
+3. `ui_dir` does not exist on disk → `.placeholder`.
+4. Sanitize: split the URL path on `/`; if any component is `..`, `.`, empty-from-`\\`, or contains `\`/NUL → mark "unsafe". Normalize `/` → `index.html`.
+5. If safe and the joined `<ui_dir>/<relpath>` exists and is a file → `.file{ abs_path, mimeForPath(relpath) }`.
+6. Else (missing, or unsafe) → SPA fallback: if `<ui_dir>/index.html` exists → `.file{ that, "text/html" }`; else `.placeholder`.
+
+This guarantees a traversal attempt (`/../../etc/passwd`) can never return a file outside `ui_dir` — it falls through to `index.html`.
 
 ## Routing (dispatch order in `serveRequest`)
 
-1. `/api/*` → existing API router + handlers (UNCHANGED).
-2. `static.lookup(path)` exact hit (`/` normalized to `/index.html`; `/_app/...`; `/favicon.png`; etc.) → respond 200 with the asset bytes + its MIME.
-3. Any other non-`/api` path → **SPA fallback**: serve `index.html` (200, `text/html`). This makes deep links and refresh on client-routed paths (e.g. `/projects/abc`) work.
-4. When `embed_ui=false`: step 2/3 have no assets; `/` (and any non-`/api`) returns a short plaintext note: "UI not embedded — build with `-Dembed-ui=true`, or run the dev server (`cd chargesheet-ui && yarn dev`, http://localhost:5173)."
+1. `/api/*`, health, cors_preflight, projects_*/jobs_*/slices_* → UNCHANGED.
+2. `.not_found` arm → `static.resolve(...)`:
+   - `.file` → `respondFile` (read bytes, 200, MIME).
+   - `.placeholder` → `respondUiPlaceholder` (plaintext note: "UI not found at `<ui_dir>` — build it (`cd chargesheet-ui && yarn build`) and set CHARGESHEET_UI_DIR, or use the dev server on :5173").
+   - `.not_handled` → existing `respondNotFound` (JSON 404 — keeps `/api/*` unknowns as JSON).
 
-CORS headers remain on `/api/*` responses (the dev :5173→:7777 flow still needs them). The embedded UI is same-origin, so it doesn't rely on CORS.
+CORS headers stay on responses (the dev :5173→:7777 flow still needs them; same-origin disk-serve doesn't).
 
 ## Error handling
 
-- `embed_ui=true`, path not an exact asset, not `/api` → SPA fallback to `index.html`. If `index.html` itself is somehow absent (build produced nothing) → 404 plaintext. (Shouldn't happen if `yarn build` succeeded; the build step fails loudly if `yarn build` errors.)
-- `embed_ui=false` → the placeholder note (not a hard error; the daemon + API still work for the dev/proxy flow).
-- A failed `yarn build` during `-Dembed-ui=true` fails the `zig build` (the `Run` step's nonzero exit propagates) — we do not ship a binary with a broken/missing UI.
+- File read failure after `resolve` said `.file` (race: deleted between stat and read) → 404 plaintext.
+- `ui_dir` missing/empty → placeholder (not a hard error; API still works for the dev/proxy flow).
+- Traversal attempts → never serve outside `ui_dir` (guaranteed by step 4/6).
 
 ## Testing
 
-- **Unit (`static.zig`)** — with a small fake asset map injected for tests:
-  - `lookup("/index.html")` → bytes + `text/html`.
-  - `lookup("/_app/immutable/x.js")` → bytes + `text/javascript`.
-  - a `.css` path → `text/css`; an unknown extension → `application/octet-stream`.
-  - `lookup("/api/v1/health")` → null (static never claims `/api`).
-- **Unit (server fallback decision)** — a helper that, given a path + asset map, returns the chosen response (asset vs index.html-fallback vs api-passthrough), tested without sockets: `/` → index.html; `/projects/abc` (no exact asset) → index.html; `/_app/x.js` (exact) → that asset; `/api/...` → not static.
-- **Manual smoke (`-Dembed-ui=true`)**: build with the flag, run the daemon, `curl http://localhost:7777/` returns the SvelteKit HTML; `curl /_app/...` returns JS with `Content-Type: text/javascript`; `curl /projects/xyz` returns index.html; `curl /api/v1/health` still returns the JSON. Open in a browser and confirm the app loads + drives the API.
-- The existing 75 daemon tests must still pass with the default `-Dembed-ui=false` (no node needed).
+- **Unit (`static.zig`)** against a `std.testing.tmpDir` fixture containing `index.html`, `_app/immutable/app.js`, `favicon.png`, `styles.css`:
+  - exact hit → `.file` with correct `abs_path` + MIME.
+  - `/` → index.html, `text/html`.
+  - unknown path (`/projects/abc`) → index.html (SPA fallback).
+  - `/api/v1/health` → `.not_handled`.
+  - non-GET → `.not_handled`.
+  - **traversal** (`/../../../etc/passwd`, `/..%2f..` already URL-decoded by the server to `/../..`) → does NOT resolve to a path outside the fixture dir (falls back to index.html or placeholder); assert the returned `abs_path`, if any, is within the fixture dir.
+  - `mimeForPath` table coverage.
+  - nonexistent `ui_dir` → `.placeholder`.
+- **Manual smoke (real UI):** `cd chargesheet-ui && yarn build`; run the daemon with `CHARGESHEET_UI_DIR=$PWD/chargesheet-ui/build`; `curl /` → SvelteKit HTML, `curl /_app/...` → JS + `text/javascript`, `curl /projects/xyz` → index.html, `curl /api/v1/health` → JSON; open in a browser and drive the API from the daemon (no `yarn dev`).
+- Existing 75 daemon tests must still pass; `zig build test` needs no node.
 
-## Out of scope (later phases)
+## Out of scope (later)
 
-- CI matrix build + GitHub Releases + the cross-platform install script (`curl|sh` + PowerShell) — that is "#3", which consumes this phase's `-Dembed-ui=true` binary.
-- Compression/caching headers (`Content-Encoding`, `ETag`, `Cache-Control`) for assets — nice-to-have; defer until it matters.
-- Serving the UI on a configurable port / path prefix — `:7777` root is fine for v1.
+- The installer placing `ui/` next to the binary + CI building the UI (that's #3).
+- Caching/compression headers (`ETag`, `Cache-Control`, gzip).
+- In-memory caching of file reads (per-request read is fine for a local single-user tool).
 
 ## Acceptance criteria
 
-- `zig build test` passes with NO node/yarn dependency (default `embed-ui=false`); 75/75 daemon tests + the new `static.zig` unit tests green.
-- `zig build -Dembed-ui=true` runs `yarn build`, embeds the output, and the daemon serves the SPA: `/` and deep links return `index.html`, asset paths return correct bytes + MIME, `/api/*` unchanged.
-- The shipped binary (embed-ui=true) is a single self-contained file — no external UI directory required at runtime.
-- `static.lookup` + the fallback decision are covered by unit tests that don't need a browser or a real build.
+- `zig build test` passes node-free; `static.resolve` fully unit-tested incl. the traversal guard, using a temp-dir fixture (no browser).
+- Daemon with `CHARGESHEET_UI_DIR` pointed at a built `build/` serves the SPA: `/` + deep links → `index.html`, asset paths → correct bytes + MIME, `/api/*` unchanged.
+- A traversal request cannot read any file outside `ui_dir`.
+- With no `ui/` present, the daemon serves the placeholder note and the API still works.
+- `build.zig` unchanged; no node dependency added to the daemon build.
