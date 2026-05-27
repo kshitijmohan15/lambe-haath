@@ -72,6 +72,8 @@ jobs:
         # generated via translate-c against these headers, so without the source
         # the module is missing and `zig build` panics ("unable to find module
         # 'mupdf'"). Pre-fetch it by URL. Source of truth: mupdf-zig/build.zig.zon.
+        # `zig fetch` must run inside a package dir (it looks for build.zig).
+        working-directory: logos
         run: zig fetch "https://mupdf.com/downloads/archive/mupdf-1.27.2-source.tar.gz"
       - name: Build daemon
         working-directory: logos
