@@ -108,7 +108,26 @@ pub fn main(init: std.process.Init) !void {
     try stdout_writer.flush();
 
     const api_server = @import("api/server.zig");
-    try api_server.serve(io, gpa, &db, .{ .port = port, .version = version, .data_dir = config.data_dir, .ui_dir = config.ui_dir });
+    api_server.serve(io, gpa, &db, .{ .port = port, .version = version, .data_dir = config.data_dir, .ui_dir = config.ui_dir }) catch |err| switch (err) {
+        error.AddressInUse => {
+            // We hold the lock for THIS data_dir, but the port is taken by some
+            // other process (e.g. a daemon left running on another data_dir, or
+            // an unrelated program). Release our lock and explain, instead of
+            // dumping a raw bind() stack trace.
+            held.deinit(io);
+            try stderr.print(
+                "{s}: port {d} is already in use — another daemon may still be running.\n" ++
+                    "Find and stop it, then retry:\n" ++
+                    "  lsof -nP -iTCP:{d} -sTCP:LISTEN\n" ++
+                    "  kill <pid>\n" ++
+                    "Or start on a different port:  {s} -p <port>\n",
+                .{ prog, port, port, prog },
+            );
+            try stderr_writer.flush();
+            std.process.exit(1);
+        },
+        else => return err,
+    };
 }
 
 extern "c" fn getpid() i32;
