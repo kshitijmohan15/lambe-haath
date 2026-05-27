@@ -77,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     }
 
-    var config = try AppConfig.load(gpa, init.environ_map);
+    var config = try AppConfig.load(io, gpa, init.environ_map);
     defer config.deinit(gpa);
 
     try std.Io.Dir.cwd().createDirPath(io, config.data_dir);
@@ -108,7 +108,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout_writer.flush();
 
     const api_server = @import("api/server.zig");
-    try api_server.serve(io, gpa, &db, .{ .port = port, .version = version, .data_dir = config.data_dir });
+    try api_server.serve(io, gpa, &db, .{ .port = port, .version = version, .data_dir = config.data_dir, .ui_dir = config.ui_dir });
 }
 
 extern "c" fn getpid() i32;
@@ -122,6 +122,7 @@ test {
     _ = @import("api/json.zig");
     _ = @import("api/router.zig");
     _ = @import("api/multipart.zig");
+    _ = @import("api/static.zig");
     _ = @import("ids.zig");
     _ = @import("storage/project_dir.zig");
 }

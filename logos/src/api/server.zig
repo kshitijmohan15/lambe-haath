@@ -17,6 +17,7 @@ const json = @import("json.zig");
 const Db = @import("../db/db.zig").Db;
 const router = @import("router.zig");
 const handlers = @import("handlers.zig");
+const static = @import("static.zig");
 const slices_mod = @import("../db/slices.zig");
 
 const cors_origin = "http://localhost:5173";
@@ -31,6 +32,7 @@ pub const ServeOptions = struct {
     port: u16,
     version: []const u8,
     data_dir: []const u8,
+    ui_dir: []const u8,
 };
 
 /// Bind 0.0.0.0:port and serve requests forever. Returns only on fatal error.
@@ -114,8 +116,44 @@ fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Serv
         .projects_slices_list => respondProjectsSlicesList(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .projects_slices_get => respondProjectsSlicesGet(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
         .projects_slices_delete => respondProjectsSlicesDelete(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
-        .not_found => respondNotFound(gpa, request),
+        .not_found => {
+            const served = static.resolve(io, gpa, opts.ui_dir, request.head.method == .GET, target) catch
+                return respondNotFound(gpa, request);
+            switch (served) {
+                .file => |f| {
+                    defer gpa.free(f.abs_path);
+                    try respondFile(io, gpa, request, f.abs_path, f.mime);
+                },
+                .placeholder => try respondUiPlaceholder(request, opts.ui_dir),
+                .not_handled => try respondNotFound(gpa, request),
+            }
+        },
     };
+}
+
+fn respondFile(io: std.Io, gpa: std.mem.Allocator, request: *http.Server.Request, abs_path: []const u8, mime: []const u8) !void {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, abs_path, gpa, .limited(100 * 1024 * 1024)) catch
+        return respondNotFound(gpa, request);
+    defer gpa.free(bytes);
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = mime },
+    } ++ cors_headers;
+    try request.respond(bytes, .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondUiPlaceholder(request: *http.Server.Request, ui_dir: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.print(
+        "logos daemon is running, but no web UI was found at:\n  {s}\n\n" ++
+            "Build it (cd chargesheet-ui && yarn build) and set CHARGESHEET_UI_DIR to that build/ dir,\n" ++
+            "or run the dev UI: cd chargesheet-ui && yarn dev (http://localhost:5173).\n",
+        .{ui_dir},
+    );
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "text/plain" },
+    } ++ cors_headers;
+    try request.respond(w.buffered(), .{ .status = .ok, .extra_headers = &headers });
 }
 
 fn respondCors(request: *http.Server.Request) !void {
