@@ -66,6 +66,13 @@ jobs:
             ~/.cache/zig
             logos/.zig-cache
           key: zigbuild-${{ matrix.platform }}-${{ hashFiles('mupdf-zig/**', 'logos/build.zig.zon', 'logos/build.zig') }}
+      - name: Fetch MuPDF source
+        # mupdf-zig is a PATH dependency of logos, and Zig does not auto-fetch a
+        # path dep's transitive *lazy* deps. The mupdf-zig `mupdf` module is
+        # generated via translate-c against these headers, so without the source
+        # the module is missing and `zig build` panics ("unable to find module
+        # 'mupdf'"). Pre-fetch it by URL. Source of truth: mupdf-zig/build.zig.zon.
+        run: zig fetch "https://mupdf.com/downloads/archive/mupdf-1.27.2-source.tar.gz"
       - name: Build daemon
         working-directory: logos
         run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
