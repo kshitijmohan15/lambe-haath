@@ -51,6 +51,13 @@ fn fileExists(io: std.Io, dir: []const u8, rel: []const u8, gpa: std.mem.Allocat
     return abs; // caller owns
 }
 
+/// Strip the query string (everything from the first '?') off a request target,
+/// returning just the path portion. Static file lookups must use the on-disk
+/// path, not the cache-busting `?v=...` params SvelteKit/Vite attach to assets.
+pub fn stripQuery(target: []const u8) []const u8 {
+    return target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
+}
+
 /// Resolve a request to a static file under `ui_dir`, with SPA fallback.
 pub fn resolve(
     io: std.Io,
@@ -142,6 +149,13 @@ test "static.resolve against a fixture ui dir" {
 test "static.resolve with missing ui dir → placeholder" {
     const gpa = testing.allocator;
     try testing.expect((try resolve(testing.io, gpa, "/nonexistent/ui/dir/xyz", true, "/")) == .placeholder);
+}
+
+test "stripQuery removes cache-busting params" {
+    try testing.expectEqualStrings("/x.js", stripQuery("/x.js?v=2"));
+    try testing.expectEqualStrings("/x.js", stripQuery("/x.js"));
+    try testing.expectEqualStrings("/", stripQuery("/"));
+    try testing.expectEqualStrings("/a", stripQuery("/a?b?c"));
 }
 
 test "mimeForPath coverage" {

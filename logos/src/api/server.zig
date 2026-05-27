@@ -117,7 +117,11 @@ fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Serv
         .projects_slices_get => respondProjectsSlicesGet(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
         .projects_slices_delete => respondProjectsSlicesDelete(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
         .not_found => {
-            const served = static.resolve(io, gpa, opts.ui_dir, request.head.method == .GET, target) catch
+            // Strip any `?query` before the on-disk lookup: SvelteKit/Vite assets
+            // carry cache-busting params (e.g. app.js?v=2) that would otherwise
+            // miss the file and fall through to the SPA index.html fallback.
+            const ui_path = static.stripQuery(target);
+            const served = static.resolve(io, gpa, opts.ui_dir, request.head.method == .GET, ui_path) catch
                 return respondNotFound(gpa, request);
             switch (served) {
                 .file => |f| {
