@@ -20,6 +20,8 @@ const handlers = @import("handlers.zig");
 const handlers_ocr = @import("handlers_ocr.zig");
 const handlers_prompts = @import("handlers_prompts.zig");
 const handlers_jobs = @import("handlers_jobs.zig");
+const handlers_stats = @import("handlers_stats.zig");
+const stats_mod = @import("../db/stats.zig");
 const sse = @import("sse.zig");
 const static = @import("static.zig");
 const slices_mod = @import("../db/slices.zig");
@@ -157,6 +159,10 @@ fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Serv
         .jobs_cancel => respondJobsCancel(gpa, request, opts.dispatcher, m.id orelse return respondNotFound(gpa, request)),
         .jobs_logs => respondJobsLogs(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .jobs_stream => respondJobsStream(io, db, request, req_mutex, m.id orelse return respondNotFound(gpa, request)),
+        .stats_overview => respondStatsOverview(gpa, db, request),
+        .stats_project => respondStatsProject(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .stats_timeseries => respondStatsTimeseries(gpa, db, request),
+        .stats_slow => respondStatsSlow(gpa, db, request),
         .not_found => {
             // Strip any `?query` before the on-disk lookup: SvelteKit/Vite assets
             // carry cache-busting params (e.g. app.js?v=2) that would otherwise
@@ -315,6 +321,42 @@ fn extractBoundary(content_type: []const u8) ?[]const u8 {
     var end = after;
     while (end < content_type.len and content_type[end] != ';' and content_type[end] != ' ') : (end += 1) {}
     return content_type[after..end];
+}
+
+/// Return the value of `?<name>=<value>` from a target like `/path?from=2026-05-01&to=2026-05-29`.
+/// Returns null if absent. Does NOT URL-decode the value.
+fn extractQueryParam(target: []const u8, name: []const u8) ?[]const u8 {
+    const q = std.mem.indexOfScalar(u8, target, '?') orelse return null;
+    var it = std.mem.tokenizeScalar(u8, target[q + 1 ..], '&');
+    while (it.next()) |kv| {
+        const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
+        if (std.mem.eql(u8, kv[0..eq], name)) return kv[eq + 1 ..];
+    }
+    return null;
+}
+
+fn writeKindTotals(w: *std.Io.Writer, k: stats_mod.KindTotals) !void {
+    try w.writeAll("{\"kind\":");
+    try json.writeJsonString(w, k.kind);
+    try w.print(",\"runs\":{d},\"in_tokens\":{d},\"out_tokens\":{d},\"cost_usd\":{d},\"avg_latency_s\":{d}}}", .{
+        k.runs, k.in_tokens, k.out_tokens, k.cost_usd, k.avg_latency_s,
+    });
+}
+
+fn writeModelTotals(w: *std.Io.Writer, m: stats_mod.ModelTotals) !void {
+    try w.writeAll("{\"model\":");
+    try json.writeJsonString(w, m.model);
+    try w.print(",\"runs\":{d},\"in_tokens\":{d},\"out_tokens\":{d},\"cost_usd\":{d}}}", .{
+        m.runs, m.in_tokens, m.out_tokens, m.cost_usd,
+    });
+}
+
+fn writeProjectTotals(w: *std.Io.Writer, p: stats_mod.ProjectTotals) !void {
+    try w.writeAll("{\"project_id\":");
+    try json.writeJsonString(w, p.project_id);
+    try w.print(",\"ocr_cost_usd\":{d},\"prompt_cost_usd\":{d},\"total_in_tokens\":{d},\"total_out_tokens\":{d},\"ocr_runs\":{d},\"prompt_runs\":{d}}}", .{
+        p.ocr_cost_usd, p.prompt_cost_usd, p.total_in_tokens, p.total_out_tokens, p.ocr_runs, p.prompt_runs,
+    });
 }
 
 fn respondError(
@@ -1122,6 +1164,131 @@ fn respondJobsStream(
 
     // Finalize the chunked stream (writes the terminal zero-length chunk).
     body_writer.end() catch {};
+}
+
+fn respondStatsOverview(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+) !void {
+    var ov = handlers_stats.getOverview(db, gpa) catch {
+        return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Stats unavailable");
+    };
+    defer ov.deinit(gpa);
+
+    var buf: [128 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+
+    try w.writeAll("{\"lifetime\":{\"ocr\":");
+    try writeKindTotals(&w, ov.lifetime.ocr);
+    try w.writeAll(",\"prompt\":");
+    try writeKindTotals(&w, ov.lifetime.prompt);
+    try w.writeAll("},\"per_model\":[");
+    for (ov.per_model, 0..) |m, i| {
+        if (i > 0) try w.writeAll(",");
+        try writeModelTotals(&w, m);
+    }
+    try w.writeAll("],\"top_projects\":[");
+    for (ov.top_projects, 0..) |p, i| {
+        if (i > 0) try w.writeAll(",");
+        try writeProjectTotals(&w, p);
+    }
+    try w.writeAll("]}");
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+    try request.respond(w.buffered(), .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondStatsProject(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+) !void {
+    var pt = handlers_stats.getProject(db, gpa, project_id) catch {
+        return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Stats unavailable");
+    };
+    defer pt.deinit(gpa);
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeProjectTotals(&w, pt);
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+    try request.respond(w.buffered(), .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondStatsTimeseries(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+) !void {
+    const from = extractQueryParam(request.head.target, "from") orelse "1970-01-01";
+    const to = extractQueryParam(request.head.target, "to") orelse "9999-12-31";
+
+    const list = handlers_stats.getTimeseries(db, gpa, from, to) catch {
+        return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Timeseries unavailable");
+    };
+    defer stats_mod.deinitTimeseries(list, gpa);
+
+    var buf: [64 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.writeAll("[");
+    for (list, 0..) |d, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"day\":");
+        try json.writeJsonString(&w, d.day);
+        try w.print(",\"in_tokens\":{d},\"out_tokens\":{d},\"cost_usd\":{d}}}", .{
+            d.in_tokens, d.out_tokens, d.cost_usd,
+        });
+    }
+    try w.writeAll("]");
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+    try request.respond(w.buffered(), .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondStatsSlow(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+) !void {
+    var limit: u32 = 20;
+    if (extractQueryParam(request.head.target, "limit")) |lim| {
+        limit = std.fmt.parseInt(u32, lim, 10) catch 20;
+        if (limit == 0 or limit > 200) limit = 20;
+    }
+    const list = handlers_stats.getSlow(db, gpa, limit) catch {
+        return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Slow jobs unavailable");
+    };
+    defer stats_mod.deinitSlowJobList(list, gpa);
+
+    var buf: [64 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.writeAll("[");
+    for (list, 0..) |s, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"kind\":");
+        try json.writeJsonString(&w, s.kind);
+        try w.writeAll(",\"project_id\":");
+        try json.writeJsonString(&w, s.project_id);
+        try w.writeAll(",\"subject\":");
+        try json.writeJsonString(&w, s.subject);
+        try w.writeAll(",\"model\":");
+        try json.writeJsonString(&w, s.model);
+        try w.print(",\"latency_s\":{d},\"total_tokens\":{d}", .{ s.latency_s, s.total_tokens });
+        try w.writeAll(",\"created_at\":");
+        try json.writeJsonString(&w, s.created_at);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+    try request.respond(w.buffered(), .{ .status = .ok, .extra_headers = &headers });
 }
 
 fn respondNotFound(gpa: std.mem.Allocator, request: *http.Server.Request) !void {

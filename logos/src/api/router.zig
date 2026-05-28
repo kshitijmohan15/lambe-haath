@@ -26,6 +26,10 @@ pub const Route = enum {
     jobs_cancel,
     jobs_logs,
     jobs_stream,
+    stats_overview,
+    stats_project,
+    stats_timeseries,
+    stats_slow,
     not_found,
     cors_preflight,
 };
@@ -38,7 +42,11 @@ pub const Match = struct {
     child: ?[]const u8 = null,
 };
 
-pub fn match(method: Method, path: []const u8) Match {
+pub fn match(method: Method, raw_path: []const u8) Match {
+    // Strip query string so matchers work with or without ?key=val params.
+    const q = std.mem.indexOfScalar(u8, raw_path, '?') orelse raw_path.len;
+    const path = raw_path[0..q];
+
     if (method == .OPTIONS and std.mem.startsWith(u8, path, "/api/")) {
         return .{ .route = .cors_preflight };
     }
@@ -67,6 +75,24 @@ pub fn match(method: Method, path: []const u8) Match {
             }
         }
         return .{ .route = .not_found };
+    }
+
+    // /api/v1/stats routes — order matters: /slow and /timeseries before /project/:id
+    if (method == .GET and std.mem.eql(u8, path, "/api/v1/stats")) {
+        return .{ .route = .stats_overview };
+    }
+    if (method == .GET and std.mem.eql(u8, path, "/api/v1/stats/slow")) {
+        return .{ .route = .stats_slow };
+    }
+    if (method == .GET and std.mem.eql(u8, path, "/api/v1/stats/timeseries")) {
+        return .{ .route = .stats_timeseries };
+    }
+    const stats_project_prefix = "/api/v1/stats/project/";
+    if (method == .GET and std.mem.startsWith(u8, path, stats_project_prefix)) {
+        const id = path[stats_project_prefix.len..];
+        if (id.len > 0 and std.mem.indexOfScalar(u8, id, '/') == null) {
+            return .{ .route = .stats_project, .id = id };
+        }
     }
 
     const prefix = "/api/v1/projects/";
@@ -257,4 +283,35 @@ test "match GET /api/v1/jobs/:id/cancel is not_found (wrong method)" {
 test "match /api/v1/jobs/ with no id is not_found" {
     const m = match(.POST, "/api/v1/jobs/");
     try testing.expectEqual(Route.not_found, m.route);
+}
+
+test "router matches GET /api/v1/stats" {
+    const m = match(.GET, "/api/v1/stats");
+    try testing.expectEqual(Route.stats_overview, m.route);
+}
+
+test "router matches GET /api/v1/stats/project/:id" {
+    const m = match(.GET, "/api/v1/stats/project/p_abc");
+    try testing.expectEqual(Route.stats_project, m.route);
+    try testing.expectEqualStrings("p_abc", m.id.?);
+}
+
+test "router matches GET /api/v1/stats/timeseries" {
+    const m = match(.GET, "/api/v1/stats/timeseries");
+    try testing.expectEqual(Route.stats_timeseries, m.route);
+}
+
+test "router matches GET /api/v1/stats/timeseries with query string" {
+    const m = match(.GET, "/api/v1/stats/timeseries?from=2026-05-01&to=2026-05-29");
+    try testing.expectEqual(Route.stats_timeseries, m.route);
+}
+
+test "router matches GET /api/v1/stats/slow" {
+    const m = match(.GET, "/api/v1/stats/slow");
+    try testing.expectEqual(Route.stats_slow, m.route);
+}
+
+test "router matches GET /api/v1/stats/slow with query string" {
+    const m = match(.GET, "/api/v1/stats/slow?limit=5");
+    try testing.expectEqual(Route.stats_slow, m.route);
 }
