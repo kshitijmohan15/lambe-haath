@@ -116,14 +116,9 @@ export const JobLogsResponseSchema = z.array(JobLogEntrySchema);
 // --- Job (full status) ---
 
 export const JobSchema = z.object({
-	id: z.string(),
-	project_id: z.string(),
-	type: z.enum(['slice', 'ocr', 'prompt']),
+	job_id: z.string(),
 	status: JobStatusSchema,
 	progress: z.number().min(0).max(1),
-	payload: z.string(),
-	results: z.string().nullable(),
+	results: z.unknown().nullable(),
 	error: z.string().nullable(),
-	created_at: z.string(),
-	updated_at: z.string(),
 });

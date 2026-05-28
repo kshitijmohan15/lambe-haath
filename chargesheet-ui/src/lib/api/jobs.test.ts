@@ -8,21 +8,16 @@ beforeEach(() => {
 describe('jobs API', () => {
 	it('getJob parses a valid job response', async () => {
 		const mockResp = {
-			id: 'job-abc',
-			project_id: 'p1',
-			type: 'ocr',
+			job_id: 'job-abc',
 			status: 'running',
 			progress: 0.5,
-			payload: '{"slice_filename":"annexure-i.pdf"}',
 			results: null,
 			error: null,
-			created_at: '2026-05-28T00:00:00Z',
-			updated_at: '2026-05-28T00:01:00Z',
 		};
 		vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(mockResp), { status: 200 })));
 
 		const result = await getJob('p1', 'job-abc');
-		expect(result.id).toBe('job-abc');
+		expect(result.job_id).toBe('job-abc');
 		expect(result.status).toBe('running');
 		expect(result.progress).toBe(0.5);
 	});
