@@ -146,6 +146,7 @@ test {
     _ = @import("agents/config.zig");
     _ = @import("agents/event_channel.zig");
     _ = @import("agents/worker.zig");
+    _ = @import("agents/supervisor.zig");
     _ = @import("api/json.zig");
     _ = @import("api/router.zig");
     _ = @import("api/multipart.zig");
