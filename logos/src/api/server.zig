@@ -804,18 +804,31 @@ fn respondProjectsExtractionsList(
     };
     defer extractions_mod.deinitList(list, gpa);
 
-    var buf: [64 * 1024]u8 = undefined;
+    var buf: [256 * 1024]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     try w.writeAll("[");
     for (list, 0..) |e, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"slice_filename\":");
+        try w.writeAll("{\"project_id\":");
+        try json.writeJsonString(&w, e.project_id);
+        try w.writeAll(",\"slice_filename\":");
         try json.writeJsonString(&w, e.slice_filename);
         try w.writeAll(",\"markdown_path\":");
         try json.writeJsonString(&w, e.markdown_path);
-        try w.print(",\"pages\":{d},\"page_markers_found\":{d}", .{ e.pages, e.page_markers_found });
+        try w.writeAll(",\"meta_path\":");
+        try json.writeJsonString(&w, e.meta_path);
         try w.writeAll(",\"model\":");
         try json.writeJsonString(&w, e.model);
+        try w.print(",\"pages\":{d},\"page_markers_found\":{d}", .{ e.pages, e.page_markers_found });
+        try w.writeAll(",\"input_tokens\":");
+        if (e.input_tokens) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.writeAll(",\"output_tokens\":");
+        if (e.output_tokens) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.writeAll(",\"input_cost_usd\":");
+        if (e.input_cost_usd) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.writeAll(",\"output_cost_usd\":");
+        if (e.output_cost_usd) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.print(",\"latency_s\":{d}", .{e.latency_s});
         try w.writeAll(",\"created_at\":");
         try json.writeJsonString(&w, e.created_at);
         try w.writeAll("}");
