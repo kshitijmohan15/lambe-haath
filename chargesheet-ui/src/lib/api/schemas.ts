@@ -17,7 +17,7 @@ export const ProjectSchema = z.object({
 
 export const ProjectListSchema = z.array(ProjectSchema);
 
-export const JobStatusSchema = z.enum(['queued', 'running', 'completed', 'failed']);
+export const JobStatusSchema = z.enum(['queued', 'running', 'completed', 'failed', 'canceled']);
 
 export const SliceResultSchema = z.object({
 	filename: z.string(),
@@ -60,4 +60,70 @@ export const ApiErrorSchema = z.object({
 	code: z.string(),
 	message: z.string(),
 	details: z.unknown().optional()
+});
+
+// --- Extractions ---
+
+export const ExtractionRowSchema = z.object({
+	project_id: z.string(),
+	slice_filename: z.string(),
+	markdown_path: z.string(),
+	meta_path: z.string(),
+	model: z.string(),
+	pages: z.number().int().positive(),
+	page_markers_found: z.number().int().nonnegative(),
+	input_tokens: z.number().int().nullable(),
+	output_tokens: z.number().int().nullable(),
+	input_cost_usd: z.number().nullable(),
+	output_cost_usd: z.number().nullable(),
+	latency_s: z.number(),
+	created_at: z.string(),
+});
+
+export const ExtractionsListResponseSchema = z.array(ExtractionRowSchema);
+
+// --- Prompt outputs ---
+
+export const PromptOutputRowSchema = z.object({
+	project_id: z.string(),
+	prompt_name: z.string(),
+	markdown_path: z.string(),
+	model: z.string(),
+	input_tokens: z.number().int().nullable(),
+	output_tokens: z.number().int().nullable(),
+	input_cost_usd: z.number().nullable(),
+	output_cost_usd: z.number().nullable(),
+	latency_s: z.number(),
+	warnings: z.array(z.string()),
+	created_at: z.string(),
+});
+
+export const PromptOutputsListResponseSchema = z.array(PromptOutputRowSchema);
+
+// --- Job logs ---
+
+export const LogLevelSchema = z.enum(['debug', 'info', 'warning', 'error']);
+
+export const JobLogEntrySchema = z.object({
+	ts: z.string(),
+	level: LogLevelSchema,
+	logger: z.string(),
+	message: z.string(),
+});
+
+export const JobLogsResponseSchema = z.array(JobLogEntrySchema);
+
+// --- Job (full status) ---
+
+export const JobSchema = z.object({
+	id: z.string(),
+	project_id: z.string(),
+	type: z.enum(['slice', 'ocr', 'prompt']),
+	status: JobStatusSchema,
+	progress: z.number().min(0).max(1),
+	payload: z.string(),
+	results: z.string().nullable(),
+	error: z.string().nullable(),
+	created_at: z.string(),
+	updated_at: z.string(),
 });
