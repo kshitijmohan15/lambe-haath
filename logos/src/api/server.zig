@@ -19,6 +19,7 @@ const router = @import("router.zig");
 const handlers = @import("handlers.zig");
 const handlers_ocr = @import("handlers_ocr.zig");
 const handlers_prompts = @import("handlers_prompts.zig");
+const handlers_jobs = @import("handlers_jobs.zig");
 const static = @import("static.zig");
 const slices_mod = @import("../db/slices.zig");
 const extractions_mod = @import("../db/extractions.zig");
@@ -151,6 +152,10 @@ fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Serv
         .projects_jobs_prompt_all => respondProjectsJobsPromptAll(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .projects_prompts_list => respondProjectsPromptsList(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .projects_prompts_get => respondProjectsPromptsGet(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
+        // TODO(Task 12): pass the real dispatcher pointer once wired in main.zig.
+        // For now, dispatcher=null causes the cancel handler to return 503.
+        .jobs_cancel => respondJobsCancel(gpa, request, null, m.id orelse return respondNotFound(gpa, request)),
+        .jobs_logs => respondJobsLogs(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .not_found => {
             // Strip any `?query` before the on-disk lookup: SvelteKit/Vite assets
             // carry cache-busting params (e.g. app.js?v=2) that would otherwise
@@ -1013,6 +1018,53 @@ fn respondProjectsPromptsGet(
     } ++ cors_headers;
 
     try request.respond(result.markdown_bytes, .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondJobsCancel(
+    gpa: std.mem.Allocator,
+    request: *http.Server.Request,
+    dispatcher: ?*@import("../agents/dispatcher.zig").Dispatcher,
+    job_id: []const u8,
+) !void {
+    _ = gpa;
+    const status_code = handlers_jobs.handleCancelJob(dispatcher, job_id) catch |err| {
+        _ = err;
+        return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Internal error");
+    };
+    if (status_code == 202) {
+        const headers = [_]std.http.Header{
+            .{ .name = "Content-Type", .value = "application/json" },
+        } ++ cors_headers;
+        try request.respond("{\"status\":\"canceling\"}", .{
+            .status = .accepted,
+            .extra_headers = &headers,
+        });
+    } else {
+        // 503: dispatcher not yet wired. Return a descriptive error.
+        return respondError(request, .service_unavailable, "SERVICE_UNAVAILABLE", "Dispatcher not available");
+    }
+}
+
+fn respondJobsLogs(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    job_id: []const u8,
+) !void {
+    const result = handlers_jobs.handleGetLogs(gpa, db, job_id) catch |err| {
+        _ = err;
+        return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Internal error");
+    };
+    defer result.deinit(gpa);
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(result.json_body, .{
+        .status = .ok,
+        .extra_headers = &headers,
+    });
 }
 
 fn respondNotFound(gpa: std.mem.Allocator, request: *http.Server.Request) !void {

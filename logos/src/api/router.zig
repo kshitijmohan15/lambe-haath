@@ -23,6 +23,8 @@ pub const Route = enum {
     projects_jobs_prompt_all,
     projects_prompts_list,
     projects_prompts_get,
+    jobs_cancel,
+    jobs_logs,
     not_found,
     cors_preflight,
 };
@@ -42,6 +44,26 @@ pub fn match(method: Method, path: []const u8) Match {
     if (method == .GET and std.mem.eql(u8, path, "/api/v1/health")) return .{ .route = .health };
     if (method == .GET and std.mem.eql(u8, path, "/api/v1/projects")) return .{ .route = .projects_list };
     if (method == .POST and std.mem.eql(u8, path, "/api/v1/projects")) return .{ .route = .projects_create };
+
+    // /api/v1/jobs/:id/cancel  and  /api/v1/jobs/:id/logs
+    const jobs_prefix = "/api/v1/jobs/";
+    if (std.mem.startsWith(u8, path, jobs_prefix)) {
+        const after_jobs = path[jobs_prefix.len..];
+        // Find the slash separating job_id from the action suffix.
+        if (std.mem.indexOfScalar(u8, after_jobs, '/')) |slash| {
+            const job_id = after_jobs[0..slash];
+            const action = after_jobs[slash + 1 ..];
+            if (job_id.len > 0) {
+                if (method == .POST and std.mem.eql(u8, action, "cancel")) {
+                    return .{ .route = .jobs_cancel, .id = job_id };
+                }
+                if (method == .GET and std.mem.eql(u8, action, "logs")) {
+                    return .{ .route = .jobs_logs, .id = job_id };
+                }
+            }
+        }
+        return .{ .route = .not_found };
+    }
 
     const prefix = "/api/v1/projects/";
     if (!std.mem.startsWith(u8, path, prefix)) return .{ .route = .not_found };
@@ -199,5 +221,29 @@ test "match DELETE /api/v1/projects/:id/slices/:filename" {
 
 test "match rejects nested filename slashes" {
     const m = match(.GET, "/api/v1/projects/proj_abc/slices/sub/dir.pdf");
+    try testing.expectEqual(Route.not_found, m.route);
+}
+
+test "match POST /api/v1/jobs/:id/cancel" {
+    const m = match(.POST, "/api/v1/jobs/job_abc123/cancel");
+    try testing.expectEqual(Route.jobs_cancel, m.route);
+    try testing.expectEqualStrings("job_abc123", m.id.?);
+    try testing.expect(m.child == null);
+}
+
+test "match GET /api/v1/jobs/:id/logs" {
+    const m = match(.GET, "/api/v1/jobs/job_abc123/logs");
+    try testing.expectEqual(Route.jobs_logs, m.route);
+    try testing.expectEqualStrings("job_abc123", m.id.?);
+    try testing.expect(m.child == null);
+}
+
+test "match GET /api/v1/jobs/:id/cancel is not_found (wrong method)" {
+    const m = match(.GET, "/api/v1/jobs/job_abc123/cancel");
+    try testing.expectEqual(Route.not_found, m.route);
+}
+
+test "match /api/v1/jobs/ with no id is not_found" {
+    const m = match(.POST, "/api/v1/jobs/");
     try testing.expectEqual(Route.not_found, m.route);
 }

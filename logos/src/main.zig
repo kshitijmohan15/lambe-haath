@@ -155,6 +155,7 @@ test {
     _ = @import("api/static.zig");
     _ = @import("api/handlers_ocr.zig");
     _ = @import("api/handlers_prompts.zig");
+    _ = @import("api/handlers_jobs.zig");
     _ = @import("ids.zig");
     _ = @import("storage/project_dir.zig");
 }

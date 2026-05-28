@@ -29,3 +29,4 @@ pub const event_channel = @import("agents/event_channel.zig");
 pub const worker = @import("agents/worker.zig");
 pub const supervisor = @import("agents/supervisor.zig");
 pub const dispatcher = @import("agents/dispatcher.zig");
+pub const handlers_jobs = @import("api/handlers_jobs.zig");
