@@ -114,7 +114,7 @@ pub fn listByProject(db: *Db, gpa: Allocator, project_id: []const u8) ![]Extract
     }
     if (rows.err) |e| return e;
 
-    return list.toOwnedSlice(gpa);
+    return try list.toOwnedSlice(gpa);
 }
 
 fn rowToExtraction(row: anytype, gpa: Allocator) !Extraction {
