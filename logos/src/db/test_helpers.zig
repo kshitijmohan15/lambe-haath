@@ -17,6 +17,13 @@ pub fn insertProject(db: *Db, id: []const u8) !void {
     , .{ id, id });
 }
 
+pub fn insertJob(db: *Db, id: []const u8, project_id: []const u8, job_type: []const u8) !void {
+    try db.conn.exec(
+        \\INSERT INTO jobs (id, project_id, type, status, payload, created_at, updated_at)
+        \\VALUES (?, ?, ?, 'queued', '{}', '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z')
+    , .{ id, project_id, job_type });
+}
+
 test "openTestDb yields a database with foreign_keys ON" {
     var db = try openTestDb();
     defer db.close();
