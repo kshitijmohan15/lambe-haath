@@ -264,6 +264,7 @@ test "deleting a slice cascades to extractions" {
         .latency_s = 1.0,
         .created_at = "2026-05-28T00:01:00Z",
     });
+    if (try getByKey(&db, gpa, "p1", "annexure-i.pdf")) |ex| { var mex = ex; mex.deinit(gpa); }
 
     try db.conn.exec("DELETE FROM slices WHERE project_id=? AND filename=?", .{ "p1", "annexure-i.pdf" });
 
