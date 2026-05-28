@@ -36,6 +36,9 @@
 
 	onMount(() => {
 		void reload();
+		return () => {
+			jobsStore.stopAll();
+		};
 	});
 
 	function findOutput(name: KnownPromptName) {
