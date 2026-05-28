@@ -1,5 +1,6 @@
 const std = @import("std");
 const Db = @import("db.zig").Db;
+const migrations = @import("migrations.zig");
 
 /// Open a fresh in-memory database with foreign keys enabled and the
 /// latest schema applied. Caller is responsible for `db.close()`.
@@ -17,12 +18,12 @@ test "openTestDb yields a database with foreign_keys ON" {
     try std.testing.expectEqual(@as(i64, 1), row.?.int(0));
 }
 
-test "openTestDb applies schema v1" {
+test "openTestDb applies latest schema" {
     var db = try openTestDb();
     defer db.close();
 
     const row = try db.conn.row("SELECT MAX(version) FROM schema_version", .{});
     try std.testing.expect(row != null);
     defer row.?.deinit();
-    try std.testing.expectEqual(@as(i64, 1), row.?.int(0));
+    try std.testing.expectEqual(migrations.latest_version, row.?.int(0));
 }
