@@ -32,6 +32,7 @@ pub const Dispatcher = struct {
     stop: std.atomic.Value(bool),
     retry_attempts: std.StringHashMap(u8),
     cancel_requests: std.StringHashMap(void),
+    cancel_mu: Io.Mutex = .init,
 
     pub fn init(
         io: Io,
@@ -74,6 +75,8 @@ pub const Dispatcher = struct {
     /// Called by HTTP handlers to request cancellation of a running job.
     /// The main loop will flush pending cancels on the next tick.
     pub fn cancelJob(self: *Dispatcher, job_id: []const u8) !void {
+        self.cancel_mu.lockUncancelable(self.io);
+        defer self.cancel_mu.unlock(self.io);
         // Avoid duplicate entries.
         if (self.cancel_requests.contains(job_id)) return;
         const owned = try self.gpa.dupe(u8, job_id);
@@ -294,10 +297,25 @@ pub const Dispatcher = struct {
     // -----------------------------------------------------------------------
 
     fn flushPendingCancels(self: *Dispatcher) void {
-        var it = self.cancel_requests.iterator();
-        while (it.next()) |entry| {
-            const job_id = entry.key_ptr.*;
-            const worker = self.sup.findByJob(job_id) orelse continue;
+        // Drain all pending keys under the lock, then release before sending
+        // notifications (stdin writes can block; we must not hold cancel_mu then).
+        var pending: std.ArrayList([]const u8) = .empty;
+        defer pending.deinit(self.gpa);
+
+        self.cancel_mu.lockUncancelable(self.io);
+        var kit = self.cancel_requests.keyIterator();
+        while (kit.next()) |k| {
+            pending.append(self.gpa, k.*) catch {};
+        }
+        self.cancel_requests.clearRetainingCapacity();
+        self.cancel_mu.unlock(self.io);
+
+        // Send notifications outside the lock, then free each key.
+        for (pending.items) |job_id| {
+            const worker = self.sup.findByJob(job_id) orelse {
+                self.gpa.free(job_id);
+                continue;
+            };
             worker.sendNotification(
                 self.gpa,
                 "notifications/cancelled",
@@ -305,17 +323,8 @@ pub const Dispatcher = struct {
             ) catch {};
             // Worker will reply with error code -32099; the response handler
             // marks the job canceled.
+            self.gpa.free(job_id);
         }
-
-        // Clear all cancel requests, freeing their keys.
-        var kit = self.cancel_requests.keyIterator();
-        var keys_to_free: std.ArrayList([]const u8) = .empty;
-        defer keys_to_free.deinit(self.gpa);
-        while (kit.next()) |k| {
-            keys_to_free.append(self.gpa, k.*) catch {};
-        }
-        self.cancel_requests.clearRetainingCapacity();
-        for (keys_to_free.items) |k| self.gpa.free(k);
     }
 
     // -----------------------------------------------------------------------
