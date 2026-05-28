@@ -214,3 +214,156 @@ test "perModel groups by model, sorts by cost desc" {
     try std.testing.expectApproxEqAbs(@as(f64, 1.5), list[0].cost_usd, 0.001);
     try std.testing.expectEqualStrings("gemini-2.5-flash", list[1].model);
 }
+
+pub const ProjectTotals = struct {
+    project_id: []const u8,
+    ocr_cost_usd: f64,
+    prompt_cost_usd: f64,
+    total_in_tokens: i64,
+    total_out_tokens: i64,
+    ocr_runs: i64,
+    prompt_runs: i64,
+
+    pub fn deinit(self: *ProjectTotals, gpa: Allocator) void {
+        gpa.free(self.project_id);
+    }
+};
+
+pub fn deinitProjectList(list: []ProjectTotals, gpa: Allocator) void {
+    for (list) |*p| p.deinit(gpa);
+    gpa.free(list);
+}
+
+/// Per-project rollup. Returns zeros for a project with no extractions and no prompt_outputs.
+pub fn perProject(db: *Db, gpa: Allocator, project_id: []const u8) !ProjectTotals {
+    const row = (try db.conn.row(
+        \\SELECT
+        \\  (SELECT coalesce(sum(coalesce(input_cost_usd,0) + coalesce(output_cost_usd,0)), 0) FROM extractions    WHERE project_id=?) AS ocr_cost,
+        \\  (SELECT coalesce(sum(coalesce(input_cost_usd,0) + coalesce(output_cost_usd,0)), 0) FROM prompt_outputs WHERE project_id=?) AS prompt_cost,
+        \\  (SELECT coalesce(sum(input_tokens),  0) FROM extractions    WHERE project_id=?) +
+        \\  (SELECT coalesce(sum(input_tokens),  0) FROM prompt_outputs WHERE project_id=?) AS total_in,
+        \\  (SELECT coalesce(sum(output_tokens), 0) FROM extractions    WHERE project_id=?) +
+        \\  (SELECT coalesce(sum(output_tokens), 0) FROM prompt_outputs WHERE project_id=?) AS total_out,
+        \\  (SELECT count(*) FROM extractions    WHERE project_id=?) AS ocr_runs,
+        \\  (SELECT count(*) FROM prompt_outputs WHERE project_id=?) AS prompt_runs
+    , .{ project_id, project_id, project_id, project_id, project_id, project_id, project_id, project_id })) orelse return error.UnexpectedNullRow;
+    defer row.deinit();
+
+    const pid = try gpa.dupe(u8, project_id);
+    return .{
+        .project_id = pid,
+        .ocr_cost_usd = row.float(0),
+        .prompt_cost_usd = row.float(1),
+        .total_in_tokens = row.int(2),
+        .total_out_tokens = row.int(3),
+        .ocr_runs = row.int(4),
+        .prompt_runs = row.int(5),
+    };
+}
+
+/// Top N projects by total cost (ocr + prompt). Used by the global /stats overview.
+pub fn topCostProjects(db: *Db, gpa: Allocator, limit: u32) ![]ProjectTotals {
+    var list: std.ArrayList(ProjectTotals) = .empty;
+    errdefer {
+        for (list.items) |*p| p.deinit(gpa);
+        list.deinit(gpa);
+    }
+
+    var rows = try db.conn.rows(
+        \\WITH all_costs AS (
+        \\  SELECT project_id,
+        \\         coalesce(input_cost_usd,0) + coalesce(output_cost_usd,0) AS c,
+        \\         coalesce(input_tokens, 0) AS in_t,
+        \\         coalesce(output_tokens, 0) AS out_t,
+        \\         'ocr' AS kind
+        \\  FROM extractions
+        \\  UNION ALL
+        \\  SELECT project_id,
+        \\         coalesce(input_cost_usd,0) + coalesce(output_cost_usd,0),
+        \\         coalesce(input_tokens, 0),
+        \\         coalesce(output_tokens, 0),
+        \\         'prompt'
+        \\  FROM prompt_outputs
+        \\)
+        \\SELECT project_id,
+        \\       coalesce(sum(CASE WHEN kind='ocr'    THEN c END), 0) AS ocr_cost,
+        \\       coalesce(sum(CASE WHEN kind='prompt' THEN c END), 0) AS prompt_cost,
+        \\       sum(in_t)  AS total_in,
+        \\       sum(out_t) AS total_out,
+        \\       sum(CASE WHEN kind='ocr'    THEN 1 ELSE 0 END) AS ocr_runs,
+        \\       sum(CASE WHEN kind='prompt' THEN 1 ELSE 0 END) AS prompt_runs
+        \\FROM all_costs
+        \\GROUP BY project_id
+        \\ORDER BY (ocr_cost + prompt_cost) DESC, project_id ASC
+        \\LIMIT ?
+    , .{@as(i64, @intCast(limit))});
+    defer rows.deinit();
+
+    while (rows.next()) |row| {
+        const pid = try gpa.dupe(u8, row.text(0));
+        errdefer gpa.free(pid);
+        try list.append(gpa, .{
+            .project_id = pid,
+            .ocr_cost_usd = row.float(1),
+            .prompt_cost_usd = row.float(2),
+            .total_in_tokens = row.int(3),
+            .total_out_tokens = row.int(4),
+            .ocr_runs = row.int(5),
+            .prompt_runs = row.int(6),
+        });
+    }
+    if (rows.err) |e| return e;
+    return try list.toOwnedSlice(gpa);
+}
+
+test "perProject returns zeros for project with no rows" {
+    var db = try Db.open(":memory:");
+    defer db.close();
+    const gpa = std.testing.allocator;
+    try test_helpers.insertProject(&db, "empty");
+
+    var t = try perProject(&db, gpa, "empty");
+    defer t.deinit(gpa);
+    try std.testing.expectEqualStrings("empty", t.project_id);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), t.ocr_cost_usd, 0.0001);
+    try std.testing.expectEqual(@as(i64, 0), t.total_in_tokens);
+}
+
+test "topCostProjects orders by total cost desc" {
+    var db = try Db.open(":memory:");
+    defer db.close();
+    const gpa = std.testing.allocator;
+
+    try test_helpers.insertProject(&db, "p_cheap");
+    try test_helpers.insertProject(&db, "p_expensive");
+    try slices.insert(&db, gpa, .{
+        .project_id = "p_cheap", .filename = "a.pdf", .start_page = 1, .end_page = 1,
+        .size_bytes = 1, .kind = .annexure, .kind_key = "i",
+        .created_at = "2026-05-28T00:00:00Z",
+    });
+    try slices.insert(&db, gpa, .{
+        .project_id = "p_expensive", .filename = "a.pdf", .start_page = 1, .end_page = 1,
+        .size_bytes = 1, .kind = .annexure, .kind_key = "i",
+        .created_at = "2026-05-28T00:00:00Z",
+    });
+    try extractions.upsert(&db, gpa, .{
+        .project_id = "p_cheap", .slice_filename = "a.pdf",
+        .markdown_path = "/c.md", .meta_path = "/c.json", .model = "g",
+        .pages = 1, .page_markers_found = 1,
+        .input_cost_usd = 0.10, .output_cost_usd = 0.10,
+        .latency_s = 1.0, .created_at = "2026-05-28T00:00:00Z",
+    });
+    try extractions.upsert(&db, gpa, .{
+        .project_id = "p_expensive", .slice_filename = "a.pdf",
+        .markdown_path = "/e.md", .meta_path = "/e.json", .model = "g",
+        .pages = 1, .page_markers_found = 1,
+        .input_cost_usd = 5.0, .output_cost_usd = 5.0,
+        .latency_s = 1.0, .created_at = "2026-05-28T00:00:00Z",
+    });
+
+    const list = try topCostProjects(&db, gpa, 10);
+    defer deinitProjectList(list, gpa);
+    try std.testing.expectEqual(@as(usize, 2), list.len);
+    try std.testing.expectEqualStrings("p_expensive", list[0].project_id);
+    try std.testing.expectEqualStrings("p_cheap", list[1].project_id);
+}
