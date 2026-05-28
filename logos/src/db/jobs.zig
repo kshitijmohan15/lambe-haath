@@ -8,12 +8,20 @@ const projects = @import("projects.zig");
 
 pub const JobType = enum {
     slice,
+    ocr,
+    prompt,
 
     pub fn toText(self: JobType) []const u8 {
-        return switch (self) { .slice => "slice" };
+        return switch (self) {
+            .slice => "slice",
+            .ocr => "ocr",
+            .prompt => "prompt",
+        };
     }
     pub fn fromText(s: []const u8) !JobType {
         if (std.mem.eql(u8, s, "slice")) return .slice;
+        if (std.mem.eql(u8, s, "ocr")) return .ocr;
+        if (std.mem.eql(u8, s, "prompt")) return .prompt;
         return error.InvalidJobType;
     }
 };
@@ -23,6 +31,7 @@ pub const JobStatus = enum {
     running,
     completed,
     failed,
+    canceled,
 
     pub fn toText(self: JobStatus) []const u8 {
         return switch (self) {
@@ -30,6 +39,7 @@ pub const JobStatus = enum {
             .running => "running",
             .completed => "completed",
             .failed => "failed",
+            .canceled => "canceled",
         };
     }
     pub fn fromText(s: []const u8) !JobStatus {
@@ -37,6 +47,7 @@ pub const JobStatus = enum {
         if (std.mem.eql(u8, s, "running")) return .running;
         if (std.mem.eql(u8, s, "completed")) return .completed;
         if (std.mem.eql(u8, s, "failed")) return .failed;
+        if (std.mem.eql(u8, s, "canceled")) return .canceled;
         return error.InvalidJobStatus;
     }
 };
@@ -489,4 +500,13 @@ test "insert with progress out of [0,1] returns CheckViolation" {
         .progress = -0.1, .payload = "{}", .results = null, .error_msg = null,
         .created_at = "t", .updated_at = "t",
     }));
+}
+
+test "JobType fromText handles ocr and prompt" {
+    try std.testing.expectEqual(JobType.ocr, try JobType.fromText("ocr"));
+    try std.testing.expectEqual(JobType.prompt, try JobType.fromText("prompt"));
+}
+
+test "JobStatus fromText handles canceled" {
+    try std.testing.expectEqual(JobStatus.canceled, try JobStatus.fromText("canceled"));
 }
