@@ -217,15 +217,9 @@ pub fn handleEnqueueOcrAll(
             .updated_at = now_dup2,
         };
 
-        jobs_mod.insert(db, gpa, job_row) catch {
-            gpa.free(job_id);
-            return error.DbError;
-        };
+        jobs_mod.insert(db, gpa, job_row) catch return error.DbError;
 
-        job_ids.append(gpa, job_id) catch {
-            gpa.free(job_id);
-            return error.OutOfMemory;
-        };
+        job_ids.append(gpa, job_id) catch return error.OutOfMemory;
     }
 
     return .{ .job_ids = try job_ids.toOwnedSlice(gpa) };
