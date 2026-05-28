@@ -28,6 +28,7 @@
 		"vitest": "^4.1.7"
 	},
 	"dependencies": {
+		"chart.js": "^4",
 		"marked": "^18.0.4",
 		"pdfjs-dist": "^4.10.38",
 		"zod": "^4.4.3"
