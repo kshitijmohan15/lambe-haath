@@ -24,3 +24,4 @@ pub const pricing = @import("agents/pricing.zig");
 pub const jsonrpc = @import("agents/jsonrpc.zig");
 pub const agent_config = @import("agents/config.zig");
 pub const event_channel = @import("agents/event_channel.zig");
+pub const worker = @import("agents/worker.zig");
