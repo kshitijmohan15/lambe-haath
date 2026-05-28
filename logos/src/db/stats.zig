@@ -367,3 +367,200 @@ test "topCostProjects orders by total cost desc" {
     try std.testing.expectEqualStrings("p_expensive", list[0].project_id);
     try std.testing.expectEqualStrings("p_cheap", list[1].project_id);
 }
+
+pub const SlowJob = struct {
+    kind: []const u8, // 'extraction' or 'prompt'
+    project_id: []const u8,
+    subject: []const u8, // slice_filename for OCR, prompt_name for prompts
+    model: []const u8,
+    latency_s: f64,
+    total_tokens: i64,
+    created_at: []const u8,
+
+    pub fn deinit(self: *SlowJob, gpa: Allocator) void {
+        gpa.free(self.kind);
+        gpa.free(self.project_id);
+        gpa.free(self.subject);
+        gpa.free(self.model);
+        gpa.free(self.created_at);
+    }
+};
+
+pub fn deinitSlowJobList(list: []SlowJob, gpa: Allocator) void {
+    for (list) |*s| s.deinit(gpa);
+    gpa.free(list);
+}
+
+pub fn slowJobs(db: *Db, gpa: Allocator, limit: u32) ![]SlowJob {
+    var list: std.ArrayList(SlowJob) = .empty;
+    errdefer {
+        for (list.items) |*s| s.deinit(gpa);
+        list.deinit(gpa);
+    }
+
+    var rows = try db.conn.rows(
+        \\SELECT 'extraction' AS kind, project_id, slice_filename AS subject, model,
+        \\       latency_s, coalesce(input_tokens,0) + coalesce(output_tokens,0) AS total_tokens, created_at
+        \\FROM extractions
+        \\UNION ALL
+        \\SELECT 'prompt' AS kind, project_id, prompt_name AS subject, model,
+        \\       latency_s, coalesce(input_tokens,0) + coalesce(output_tokens,0) AS total_tokens, created_at
+        \\FROM prompt_outputs
+        \\ORDER BY latency_s DESC
+        \\LIMIT ?
+    , .{@as(i64, @intCast(limit))});
+    defer rows.deinit();
+
+    while (rows.next()) |row| {
+        const kind = try gpa.dupe(u8, row.text(0));
+        errdefer gpa.free(kind);
+        const pid = try gpa.dupe(u8, row.text(1));
+        errdefer gpa.free(pid);
+        const subject = try gpa.dupe(u8, row.text(2));
+        errdefer gpa.free(subject);
+        const model = try gpa.dupe(u8, row.text(3));
+        errdefer gpa.free(model);
+        const created = try gpa.dupe(u8, row.text(6));
+        errdefer gpa.free(created);
+        try list.append(gpa, .{
+            .kind = kind,
+            .project_id = pid,
+            .subject = subject,
+            .model = model,
+            .latency_s = row.float(4),
+            .total_tokens = row.int(5),
+            .created_at = created,
+        });
+    }
+    if (rows.err) |e| return e;
+    return try list.toOwnedSlice(gpa);
+}
+
+pub const DayBucket = struct {
+    day: []const u8, // 'YYYY-MM-DD'
+    in_tokens: i64,
+    out_tokens: i64,
+    cost_usd: f64,
+
+    pub fn deinit(self: *DayBucket, gpa: Allocator) void {
+        gpa.free(self.day);
+    }
+};
+
+pub fn deinitTimeseries(list: []DayBucket, gpa: Allocator) void {
+    for (list) |*d| d.deinit(gpa);
+    gpa.free(list);
+}
+
+/// Daily aggregates between [from, to] inclusive. Both bounds are 'YYYY-MM-DD' strings.
+/// Returns ascending by day. Days with no activity are omitted (UI fills gaps with zero if it wants).
+pub fn timeseries(db: *Db, gpa: Allocator, from: []const u8, to: []const u8) ![]DayBucket {
+    var list: std.ArrayList(DayBucket) = .empty;
+    errdefer {
+        for (list.items) |*d| d.deinit(gpa);
+        list.deinit(gpa);
+    }
+
+    var rows = try db.conn.rows(
+        \\SELECT date(created_at) AS day,
+        \\       coalesce(sum(input_tokens), 0) AS in_tokens,
+        \\       coalesce(sum(output_tokens), 0) AS out_tokens,
+        \\       coalesce(sum(coalesce(input_cost_usd,0) + coalesce(output_cost_usd,0)), 0) AS cost
+        \\FROM (
+        \\  SELECT created_at, input_tokens, output_tokens, input_cost_usd, output_cost_usd FROM extractions
+        \\  UNION ALL
+        \\  SELECT created_at, input_tokens, output_tokens, input_cost_usd, output_cost_usd FROM prompt_outputs
+        \\)
+        \\WHERE date(created_at) BETWEEN ? AND ?
+        \\GROUP BY day
+        \\ORDER BY day ASC
+    , .{ from, to });
+    defer rows.deinit();
+
+    while (rows.next()) |row| {
+        const day = try gpa.dupe(u8, row.text(0));
+        errdefer gpa.free(day);
+        try list.append(gpa, .{
+            .day = day,
+            .in_tokens = row.int(1),
+            .out_tokens = row.int(2),
+            .cost_usd = row.float(3),
+        });
+    }
+    if (rows.err) |e| return e;
+    return try list.toOwnedSlice(gpa);
+}
+
+test "slowJobs orders by latency desc and tags kind" {
+    var db = try Db.open(":memory:");
+    defer db.close();
+    const gpa = std.testing.allocator;
+
+    try test_helpers.insertProject(&db, "p1");
+    try slices.insert(&db, gpa, .{
+        .project_id = "p1", .filename = "a.pdf", .start_page = 1, .end_page = 1,
+        .size_bytes = 1, .kind = .annexure, .kind_key = "i",
+        .created_at = "2026-05-28T00:00:00Z",
+    });
+    try extractions.upsert(&db, gpa, .{
+        .project_id = "p1", .slice_filename = "a.pdf",
+        .markdown_path = "/x.md", .meta_path = "/x.json", .model = "g",
+        .pages = 1, .page_markers_found = 1,
+        .input_tokens = 100, .output_tokens = 200,
+        .latency_s = 3.5, .created_at = "2026-05-28T00:00:00Z",
+    });
+    try prompt_outputs.upsert(&db, gpa, .{
+        .project_id = "p1", .prompt_name = "x",
+        .markdown_path = "/p.md", .model = "claude-sonnet-4-6",
+        .input_tokens = 1, .output_tokens = 1,
+        .latency_s = 99.0, .warnings_json = "[]",
+        .created_at = "2026-05-28T00:00:00Z",
+    });
+
+    const list = try slowJobs(&db, gpa, 10);
+    defer deinitSlowJobList(list, gpa);
+    try std.testing.expectEqual(@as(usize, 2), list.len);
+    try std.testing.expectEqualStrings("prompt", list[0].kind);
+    try std.testing.expectApproxEqAbs(@as(f64, 99.0), list[0].latency_s, 0.001);
+    try std.testing.expectEqualStrings("extraction", list[1].kind);
+}
+
+test "timeseries buckets by day, respects from/to" {
+    var db = try Db.open(":memory:");
+    defer db.close();
+    const gpa = std.testing.allocator;
+
+    try test_helpers.insertProject(&db, "p1");
+    try slices.insert(&db, gpa, .{
+        .project_id = "p1", .filename = "a.pdf", .start_page = 1, .end_page = 1,
+        .size_bytes = 1, .kind = .annexure, .kind_key = "i",
+        .created_at = "2026-05-25T00:00:00Z",
+    });
+    try slices.insert(&db, gpa, .{
+        .project_id = "p1", .filename = "b.pdf", .start_page = 1, .end_page = 1,
+        .size_bytes = 1, .kind = .annexure, .kind_key = "ii",
+        .created_at = "2026-05-27T00:00:00Z",
+    });
+    try extractions.upsert(&db, gpa, .{
+        .project_id = "p1", .slice_filename = "a.pdf",
+        .markdown_path = "/a.md", .meta_path = "/a.json", .model = "g",
+        .pages = 1, .page_markers_found = 1,
+        .input_tokens = 100, .output_tokens = 200,
+        .input_cost_usd = 0.01, .output_cost_usd = 0.02,
+        .latency_s = 1.0, .created_at = "2026-05-25T10:00:00Z",
+    });
+    try extractions.upsert(&db, gpa, .{
+        .project_id = "p1", .slice_filename = "b.pdf",
+        .markdown_path = "/b.md", .meta_path = "/b.json", .model = "g",
+        .pages = 1, .page_markers_found = 1,
+        .input_tokens = 50, .output_tokens = 100,
+        .input_cost_usd = 0.005, .output_cost_usd = 0.01,
+        .latency_s = 1.0, .created_at = "2026-05-27T10:00:00Z",
+    });
+
+    const list = try timeseries(&db, gpa, "2026-05-26", "2026-05-28");
+    defer deinitTimeseries(list, gpa);
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqualStrings("2026-05-27", list[0].day);
+    try std.testing.expectEqual(@as(i64, 50), list[0].in_tokens);
+}
