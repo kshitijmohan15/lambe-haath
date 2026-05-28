@@ -12,9 +12,24 @@ pub const Route = enum {
     projects_chargesheet,
     projects_jobs_slice,
     projects_jobs_get,
+    projects_jobs_ocr,
+    projects_jobs_ocr_all,
     projects_slices_list,
     projects_slices_get,
     projects_slices_delete,
+    projects_extractions_list,
+    projects_extractions_get,
+    projects_jobs_prompt,
+    projects_jobs_prompt_all,
+    projects_prompts_list,
+    projects_prompts_get,
+    jobs_cancel,
+    jobs_logs,
+    jobs_stream,
+    stats_overview,
+    stats_project,
+    stats_timeseries,
+    stats_slow,
     not_found,
     cors_preflight,
 };
@@ -27,13 +42,58 @@ pub const Match = struct {
     child: ?[]const u8 = null,
 };
 
-pub fn match(method: Method, path: []const u8) Match {
+pub fn match(method: Method, raw_path: []const u8) Match {
+    // Strip query string so matchers work with or without ?key=val params.
+    const q = std.mem.indexOfScalar(u8, raw_path, '?') orelse raw_path.len;
+    const path = raw_path[0..q];
+
     if (method == .OPTIONS and std.mem.startsWith(u8, path, "/api/")) {
         return .{ .route = .cors_preflight };
     }
     if (method == .GET and std.mem.eql(u8, path, "/api/v1/health")) return .{ .route = .health };
     if (method == .GET and std.mem.eql(u8, path, "/api/v1/projects")) return .{ .route = .projects_list };
     if (method == .POST and std.mem.eql(u8, path, "/api/v1/projects")) return .{ .route = .projects_create };
+
+    // /api/v1/jobs/:id/cancel  and  /api/v1/jobs/:id/logs
+    const jobs_prefix = "/api/v1/jobs/";
+    if (std.mem.startsWith(u8, path, jobs_prefix)) {
+        const after_jobs = path[jobs_prefix.len..];
+        // Find the slash separating job_id from the action suffix.
+        if (std.mem.indexOfScalar(u8, after_jobs, '/')) |slash| {
+            const job_id = after_jobs[0..slash];
+            const action = after_jobs[slash + 1 ..];
+            if (job_id.len > 0) {
+                if (method == .POST and std.mem.eql(u8, action, "cancel")) {
+                    return .{ .route = .jobs_cancel, .id = job_id };
+                }
+                if (method == .GET and std.mem.eql(u8, action, "logs")) {
+                    return .{ .route = .jobs_logs, .id = job_id };
+                }
+                if (method == .GET and std.mem.eql(u8, action, "stream")) {
+                    return .{ .route = .jobs_stream, .id = job_id };
+                }
+            }
+        }
+        return .{ .route = .not_found };
+    }
+
+    // /api/v1/stats routes — order matters: /slow and /timeseries before /project/:id
+    if (method == .GET and std.mem.eql(u8, path, "/api/v1/stats")) {
+        return .{ .route = .stats_overview };
+    }
+    if (method == .GET and std.mem.eql(u8, path, "/api/v1/stats/slow")) {
+        return .{ .route = .stats_slow };
+    }
+    if (method == .GET and std.mem.eql(u8, path, "/api/v1/stats/timeseries")) {
+        return .{ .route = .stats_timeseries };
+    }
+    const stats_project_prefix = "/api/v1/stats/project/";
+    if (method == .GET and std.mem.startsWith(u8, path, stats_project_prefix)) {
+        const id = path[stats_project_prefix.len..];
+        if (id.len > 0 and std.mem.indexOfScalar(u8, id, '/') == null) {
+            return .{ .route = .stats_project, .id = id };
+        }
+    }
 
     const prefix = "/api/v1/projects/";
     if (!std.mem.startsWith(u8, path, prefix)) return .{ .route = .not_found };
@@ -60,6 +120,18 @@ pub fn match(method: Method, path: []const u8) Match {
         if (method == .POST and std.mem.eql(u8, job_part, "slice")) {
             return .{ .route = .projects_jobs_slice, .id = id };
         }
+        if (method == .POST and std.mem.eql(u8, job_part, "ocr/all")) {
+            return .{ .route = .projects_jobs_ocr_all, .id = id };
+        }
+        if (method == .POST and std.mem.eql(u8, job_part, "ocr")) {
+            return .{ .route = .projects_jobs_ocr, .id = id };
+        }
+        if (method == .POST and std.mem.eql(u8, job_part, "prompt/all")) {
+            return .{ .route = .projects_jobs_prompt_all, .id = id };
+        }
+        if (method == .POST and std.mem.eql(u8, job_part, "prompt")) {
+            return .{ .route = .projects_jobs_prompt, .id = id };
+        }
         // /api/v1/projects/:id/jobs/:job_id
         if (method == .GET and std.mem.indexOfScalar(u8, job_part, '/') == null and job_part.len > 0) {
             return .{ .route = .projects_jobs_get, .id = id, .child = job_part };
@@ -75,6 +147,28 @@ pub fn match(method: Method, path: []const u8) Match {
         if (filename.len > 0 and std.mem.indexOfScalar(u8, filename, '/') == null) {
             if (method == .GET) return .{ .route = .projects_slices_get, .id = id, .child = filename };
             if (method == .DELETE) return .{ .route = .projects_slices_delete, .id = id, .child = filename };
+        }
+    }
+
+    // /api/v1/projects/:id/extractions/...
+    if (std.mem.eql(u8, after_id, "extractions") and method == .GET) {
+        return .{ .route = .projects_extractions_list, .id = id };
+    }
+    if (std.mem.startsWith(u8, after_id, "extractions/")) {
+        const filename = after_id["extractions/".len..];
+        if (filename.len > 0 and std.mem.indexOfScalar(u8, filename, '/') == null) {
+            if (method == .GET) return .{ .route = .projects_extractions_get, .id = id, .child = filename };
+        }
+    }
+
+    // /api/v1/projects/:id/prompts/...
+    if (std.mem.eql(u8, after_id, "prompts") and method == .GET) {
+        return .{ .route = .projects_prompts_list, .id = id };
+    }
+    if (std.mem.startsWith(u8, after_id, "prompts/")) {
+        const prompt_name = after_id["prompts/".len..];
+        if (prompt_name.len > 0 and std.mem.indexOfScalar(u8, prompt_name, '/') == null) {
+            if (method == .GET) return .{ .route = .projects_prompts_get, .id = id, .child = prompt_name };
         }
     }
 
@@ -158,4 +252,66 @@ test "match DELETE /api/v1/projects/:id/slices/:filename" {
 test "match rejects nested filename slashes" {
     const m = match(.GET, "/api/v1/projects/proj_abc/slices/sub/dir.pdf");
     try testing.expectEqual(Route.not_found, m.route);
+}
+
+test "match POST /api/v1/jobs/:id/cancel" {
+    const m = match(.POST, "/api/v1/jobs/job_abc123/cancel");
+    try testing.expectEqual(Route.jobs_cancel, m.route);
+    try testing.expectEqualStrings("job_abc123", m.id.?);
+    try testing.expect(m.child == null);
+}
+
+test "match GET /api/v1/jobs/:id/logs" {
+    const m = match(.GET, "/api/v1/jobs/job_abc123/logs");
+    try testing.expectEqual(Route.jobs_logs, m.route);
+    try testing.expectEqualStrings("job_abc123", m.id.?);
+    try testing.expect(m.child == null);
+}
+
+test "match GET /api/v1/jobs/:id/stream" {
+    const m = match(.GET, "/api/v1/jobs/job_abc123/stream");
+    try testing.expectEqual(Route.jobs_stream, m.route);
+    try testing.expectEqualStrings("job_abc123", m.id.?);
+    try testing.expect(m.child == null);
+}
+
+test "match GET /api/v1/jobs/:id/cancel is not_found (wrong method)" {
+    const m = match(.GET, "/api/v1/jobs/job_abc123/cancel");
+    try testing.expectEqual(Route.not_found, m.route);
+}
+
+test "match /api/v1/jobs/ with no id is not_found" {
+    const m = match(.POST, "/api/v1/jobs/");
+    try testing.expectEqual(Route.not_found, m.route);
+}
+
+test "router matches GET /api/v1/stats" {
+    const m = match(.GET, "/api/v1/stats");
+    try testing.expectEqual(Route.stats_overview, m.route);
+}
+
+test "router matches GET /api/v1/stats/project/:id" {
+    const m = match(.GET, "/api/v1/stats/project/p_abc");
+    try testing.expectEqual(Route.stats_project, m.route);
+    try testing.expectEqualStrings("p_abc", m.id.?);
+}
+
+test "router matches GET /api/v1/stats/timeseries" {
+    const m = match(.GET, "/api/v1/stats/timeseries");
+    try testing.expectEqual(Route.stats_timeseries, m.route);
+}
+
+test "router matches GET /api/v1/stats/timeseries with query string" {
+    const m = match(.GET, "/api/v1/stats/timeseries?from=2026-05-01&to=2026-05-29");
+    try testing.expectEqual(Route.stats_timeseries, m.route);
+}
+
+test "router matches GET /api/v1/stats/slow" {
+    const m = match(.GET, "/api/v1/stats/slow");
+    try testing.expectEqual(Route.stats_slow, m.route);
+}
+
+test "router matches GET /api/v1/stats/slow with query string" {
+    const m = match(.GET, "/api/v1/stats/slow?limit=5");
+    try testing.expectEqual(Route.stats_slow, m.route);
 }

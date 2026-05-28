@@ -12,6 +12,20 @@ export type SliceListingItem = z.infer<typeof s.SliceListingItemSchema>;
 export type SliceListResponse = z.infer<typeof s.SliceListResponseSchema>;
 export type HealthResponse = z.infer<typeof s.HealthResponseSchema>;
 export type ApiError = z.infer<typeof s.ApiErrorSchema>;
+export type ExtractionRow = z.infer<typeof s.ExtractionRowSchema>;
+export type ExtractionsListResponse = z.infer<typeof s.ExtractionsListResponseSchema>;
+export type PromptOutputRow = z.infer<typeof s.PromptOutputRowSchema>;
+export type PromptOutputsListResponse = z.infer<typeof s.PromptOutputsListResponseSchema>;
+export type LogLevel = z.infer<typeof s.LogLevelSchema>;
+export type JobLogEntry = z.infer<typeof s.JobLogEntrySchema>;
+export type JobLogsResponse = z.infer<typeof s.JobLogsResponseSchema>;
+export type Job = z.infer<typeof s.JobSchema>;
+export type KindTotals = z.infer<typeof s.KindTotalsSchema>;
+export type ModelTotals = z.infer<typeof s.ModelTotalsSchema>;
+export type ProjectTotals = z.infer<typeof s.ProjectTotalsSchema>;
+export type Overview = z.infer<typeof s.OverviewSchema>;
+export type DayBucket = z.infer<typeof s.DayBucketSchema>;
+export type SlowJob = z.infer<typeof s.SlowJobSchema>;
 
 export interface LocalSlice {
 	id: string;

@@ -8,12 +8,20 @@ const projects = @import("projects.zig");
 
 pub const JobType = enum {
     slice,
+    ocr,
+    prompt,
 
     pub fn toText(self: JobType) []const u8 {
-        return switch (self) { .slice => "slice" };
+        return switch (self) {
+            .slice => "slice",
+            .ocr => "ocr",
+            .prompt => "prompt",
+        };
     }
     pub fn fromText(s: []const u8) !JobType {
         if (std.mem.eql(u8, s, "slice")) return .slice;
+        if (std.mem.eql(u8, s, "ocr")) return .ocr;
+        if (std.mem.eql(u8, s, "prompt")) return .prompt;
         return error.InvalidJobType;
     }
 };
@@ -23,6 +31,7 @@ pub const JobStatus = enum {
     running,
     completed,
     failed,
+    canceled,
 
     pub fn toText(self: JobStatus) []const u8 {
         return switch (self) {
@@ -30,6 +39,7 @@ pub const JobStatus = enum {
             .running => "running",
             .completed => "completed",
             .failed => "failed",
+            .canceled => "canceled",
         };
     }
     pub fn fromText(s: []const u8) !JobStatus {
@@ -37,6 +47,7 @@ pub const JobStatus = enum {
         if (std.mem.eql(u8, s, "running")) return .running;
         if (std.mem.eql(u8, s, "completed")) return .completed;
         if (std.mem.eql(u8, s, "failed")) return .failed;
+        if (std.mem.eql(u8, s, "canceled")) return .canceled;
         return error.InvalidJobStatus;
     }
 };
@@ -219,6 +230,104 @@ pub fn claimNextQueued(db: *Db, gpa: Allocator) !?Job {
     , .{ts})) orelse return null;
     defer row.deinit();
     return try rowToJob(row, gpa);
+}
+
+/// Fetch the oldest queued job of the given type whose preconditions are met.
+/// For 'slice' / 'ocr': any queued job. For 'prompt': queued AND all required
+/// slices have extractions (LEFT JOIN gate from the spec).
+/// Caller owns the returned Job.
+pub fn nextDispatchable(db: *Db, gpa: Allocator, job_type: JobType) !?Job {
+    if (job_type == .prompt) {
+        const row = try db.conn.row(
+            \\SELECT id, project_id, type, status, progress, payload, results, error,
+            \\       created_at, updated_at
+            \\FROM jobs j
+            \\WHERE j.status='queued' AND j.type='prompt'
+            \\AND NOT EXISTS (
+            \\  SELECT 1 FROM slices s
+            \\  LEFT JOIN extractions e
+            \\         ON s.project_id = e.project_id AND s.filename = e.slice_filename
+            \\  WHERE s.project_id = j.project_id
+            \\    AND s.kind IN ('annexure','rud')
+            \\    AND e.slice_filename IS NULL
+            \\)
+            \\ORDER BY j.created_at ASC LIMIT 1
+        , .{});
+        if (row) |r| {
+            defer r.deinit();
+            return try rowToJob(r, gpa);
+        }
+        return null;
+    }
+
+    const text = job_type.toText();
+    const row = try db.conn.row(
+        \\SELECT id, project_id, type, status, progress, payload, results, error,
+        \\       created_at, updated_at
+        \\FROM jobs WHERE status='queued' AND type=?
+        \\ORDER BY created_at ASC LIMIT 1
+    , .{text});
+    if (row) |r| {
+        defer r.deinit();
+        return try rowToJob(r, gpa);
+    }
+    return null;
+}
+
+/// Mark a job as running. Caller supplies the timestamp.
+pub fn markRunning(db: *Db, job_id: []const u8, updated_at: []const u8) !void {
+    try db.conn.exec(
+        "UPDATE jobs SET status='running', updated_at=? WHERE id=?",
+        .{ updated_at, job_id },
+    );
+}
+
+/// Mark a job as completed. Caller supplies results JSON and the timestamp.
+pub fn markCompletedAt(db: *Db, job_id: []const u8, results_json: []const u8, updated_at: []const u8) !void {
+    try db.conn.exec(
+        "UPDATE jobs SET status='completed', progress=1.0, results=?, updated_at=? WHERE id=?",
+        .{ results_json, updated_at, job_id },
+    );
+}
+
+/// Mark a job as failed. Caller supplies error message and the timestamp.
+pub fn markFailedAt(db: *Db, job_id: []const u8, error_msg: []const u8, updated_at: []const u8) !void {
+    try db.conn.exec(
+        "UPDATE jobs SET status='failed', error=?, updated_at=? WHERE id=?",
+        .{ error_msg, updated_at, job_id },
+    );
+}
+
+/// Mark a job as canceled. Caller supplies error message and the timestamp.
+pub fn markCanceled(db: *Db, job_id: []const u8, error_msg: []const u8, updated_at: []const u8) !void {
+    try db.conn.exec(
+        "UPDATE jobs SET status='canceled', error=?, updated_at=? WHERE id=?",
+        .{ error_msg, updated_at, job_id },
+    );
+}
+
+/// Re-queue a job (clear error, set status back to queued). Caller supplies the timestamp.
+pub fn markReQueued(db: *Db, job_id: []const u8, updated_at: []const u8) !void {
+    try db.conn.exec(
+        "UPDATE jobs SET status='queued', error=NULL, updated_at=? WHERE id=?",
+        .{ updated_at, job_id },
+    );
+}
+
+/// Update job progress. Caller supplies progress value and the timestamp.
+pub fn updateProgressAt(db: *Db, job_id: []const u8, progress: f64, updated_at: []const u8) !void {
+    try db.conn.exec(
+        "UPDATE jobs SET progress=?, updated_at=? WHERE id=?",
+        .{ progress, updated_at, job_id },
+    );
+}
+
+/// Daemon-restart cleanup: mark all `running` and `queued` jobs as failed.
+pub fn markStuckJobsFailed(db: *Db, updated_at: []const u8) !void {
+    try db.conn.exec(
+        \\UPDATE jobs SET status='failed', error='daemon_restarted', updated_at=?
+        \\WHERE status='running' OR status='queued'
+    , .{updated_at});
 }
 
 fn seedProject(db: *Db, gpa: Allocator, id: []const u8) !void {
@@ -489,4 +598,85 @@ test "insert with progress out of [0,1] returns CheckViolation" {
         .progress = -0.1, .payload = "{}", .results = null, .error_msg = null,
         .created_at = "t", .updated_at = "t",
     }));
+}
+
+test "JobType fromText handles ocr and prompt" {
+    try std.testing.expectEqual(JobType.ocr, try JobType.fromText("ocr"));
+    try std.testing.expectEqual(JobType.prompt, try JobType.fromText("prompt"));
+}
+
+test "JobStatus fromText handles canceled" {
+    try std.testing.expectEqual(JobStatus.canceled, try JobStatus.fromText("canceled"));
+}
+
+test "nextDispatchable returns oldest queued ocr job" {
+    var db = try Db.open(":memory:");
+    defer db.close();
+    const gpa = std.testing.allocator;
+    try test_helpers.insertProject(&db, "p1");
+
+    try test_helpers.insertJob(&db, "j_old", "p1", "ocr");
+    try test_helpers.insertJob(&db, "j_new", "p1", "ocr");
+
+    var got = (try nextDispatchable(&db, gpa, .ocr)) orelse return error.NoJob;
+    defer got.deinit(gpa);
+
+    // Both jobs have the same fixed timestamp in insertJob, so we accept either id.
+    try std.testing.expect(
+        std.mem.eql(u8, got.id, "j_old") or std.mem.eql(u8, got.id, "j_new"),
+    );
+    try std.testing.expectEqual(JobType.ocr, got.type);
+    try std.testing.expectEqual(JobStatus.queued, got.status);
+}
+
+test "nextDispatchable for prompt is gated on OCR fan-in" {
+    var db = try Db.open(":memory:");
+    defer db.close();
+    const gpa = std.testing.allocator;
+
+    try test_helpers.insertProject(&db, "p1");
+    // Insert one annexure slice without an extraction.
+    try db.conn.exec(
+        \\INSERT INTO slices (project_id, filename, start_page, end_page, size_bytes, kind, kind_key, created_at)
+        \\VALUES ('p1', 'annexure-i.pdf', 1, 1, 1, 'annexure', 'i', '2026-05-28T00:00:00Z')
+    , .{});
+    try test_helpers.insertJob(&db, "jp", "p1", "prompt");
+
+    // No extraction row → prompt job not dispatchable.
+    const got_blocked = try nextDispatchable(&db, gpa, .prompt);
+    try std.testing.expect(got_blocked == null);
+
+    // Add the extraction → prompt job is now dispatchable.
+    try db.conn.exec(
+        \\INSERT INTO extractions
+        \\  (project_id, slice_filename, markdown_path, meta_path, model,
+        \\   pages, page_markers_found, latency_s, created_at)
+        \\VALUES ('p1', 'annexure-i.pdf', '/x.md', '/x.json', 'mock', 1, 1, 1.0, '2026-05-28T00:01:00Z')
+    , .{});
+
+    var got = (try nextDispatchable(&db, gpa, .prompt)) orelse return error.NoJob;
+    defer got.deinit(gpa);
+    try std.testing.expectEqualStrings("jp", got.id);
+}
+
+test "markStuckJobsFailed flips running and queued to failed" {
+    var db = try Db.open(":memory:");
+    defer db.close();
+    try test_helpers.insertProject(&db, "p1");
+    try test_helpers.insertJob(&db, "jq", "p1", "ocr"); // queued
+
+    // Manually insert one job in 'running' state.
+    try db.conn.exec(
+        \\INSERT INTO jobs (id, project_id, type, status, payload, created_at, updated_at)
+        \\VALUES ('jr', 'p1', 'ocr', 'running', '{}', '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z')
+    , .{});
+
+    try markStuckJobsFailed(&db, "2026-05-28T00:10:00Z");
+
+    const r = (try db.conn.row(
+        "SELECT count(*) FROM jobs WHERE status='failed' AND error='daemon_restarted'",
+        .{},
+    )).?;
+    defer r.deinit();
+    try std.testing.expectEqual(@as(i64, 2), r.int(0));
 }

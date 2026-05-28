@@ -17,8 +17,17 @@ const json = @import("json.zig");
 const Db = @import("../db/db.zig").Db;
 const router = @import("router.zig");
 const handlers = @import("handlers.zig");
+const handlers_ocr = @import("handlers_ocr.zig");
+const handlers_prompts = @import("handlers_prompts.zig");
+const handlers_jobs = @import("handlers_jobs.zig");
+const handlers_stats = @import("handlers_stats.zig");
+const stats_mod = @import("../db/stats.zig");
+const sse = @import("sse.zig");
 const static = @import("static.zig");
 const slices_mod = @import("../db/slices.zig");
+const extractions_mod = @import("../db/extractions.zig");
+const prompt_outputs_mod = @import("../db/prompt_outputs.zig");
+const Dispatcher = @import("../agents/dispatcher.zig").Dispatcher;
 
 const cors_origin = "http://localhost:5173";
 
@@ -33,6 +42,7 @@ pub const ServeOptions = struct {
     version: []const u8,
     data_dir: []const u8,
     ui_dir: []const u8,
+    dispatcher: ?*Dispatcher = null,
 };
 
 /// Bind 0.0.0.0:port and serve connections forever. Returns only on fatal error.
@@ -47,7 +57,7 @@ pub const ServeOptions = struct {
 /// concurrently regardless of SQLite's compiled thread mode. Trade-off: a slow
 /// request (e.g. a sync slice job) briefly serializes other requests — fine for
 /// a single-user local tool.
-pub fn serve(io: std.Io, gpa: std.mem.Allocator, db: *Db, opts: ServeOptions) !void {
+pub fn serve(io: std.Io, gpa: std.mem.Allocator, db: *Db, req_mutex: *std.Io.Mutex, opts: ServeOptions) !void {
     const address = try net.IpAddress.parseIp4("0.0.0.0", opts.port);
     // reuse_address=false so a second daemon on the same port fails loudly with
     // AddressInUse. The lock file alone only guards same-data_dir collisions —
@@ -58,13 +68,12 @@ pub fn serve(io: std.Io, gpa: std.mem.Allocator, db: *Db, opts: ServeOptions) !v
 
     std.log.info("HTTP listening on http://0.0.0.0:{d}/", .{opts.port});
 
-    var req_mutex: std.Io.Mutex = .init;
     while (true) {
         const stream = tcp_server.accept(io) catch |err| {
             std.log.err("accept failed: {t}", .{err});
             continue;
         };
-        const thread = std.Thread.spawn(.{}, handleConnection, .{ io, gpa, db, stream, opts, &req_mutex }) catch |err| {
+        const thread = std.Thread.spawn(.{}, handleConnection, .{ io, gpa, db, stream, opts, req_mutex }) catch |err| {
             std.log.err("connection thread spawn failed: {t}", .{err});
             var copy = stream;
             copy.close(io);
@@ -100,7 +109,7 @@ fn handleConnection(io: std.Io, gpa: std.mem.Allocator, db: *Db, stream: net.Str
         };
         req_mutex.lockUncancelable(io);
         defer req_mutex.unlock(io);
-        serveRequest(io, gpa, db, &request, opts) catch |err| {
+        serveRequest(io, gpa, db, &request, opts, req_mutex) catch |err| {
             std.log.err("serveRequest failed: {t}", .{err});
             return;
         };
@@ -117,7 +126,7 @@ fn methodFromHttp(m: http.Method) ?router.Method {
     };
 }
 
-fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Server.Request, opts: ServeOptions) !void {
+fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Server.Request, opts: ServeOptions, req_mutex: *std.Io.Mutex) !void {
     const target = request.head.target;
     std.log.info("{t} {s}", .{ request.head.method, target });
 
@@ -139,6 +148,21 @@ fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Serv
         .projects_slices_list => respondProjectsSlicesList(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .projects_slices_get => respondProjectsSlicesGet(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
         .projects_slices_delete => respondProjectsSlicesDelete(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
+        .projects_jobs_ocr => respondProjectsJobsOcr(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .projects_jobs_ocr_all => respondProjectsJobsOcrAll(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .projects_extractions_list => respondProjectsExtractionsList(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .projects_extractions_get => respondProjectsExtractionsGet(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
+        .projects_jobs_prompt => respondProjectsJobsPrompt(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .projects_jobs_prompt_all => respondProjectsJobsPromptAll(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .projects_prompts_list => respondProjectsPromptsList(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .projects_prompts_get => respondProjectsPromptsGet(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
+        .jobs_cancel => respondJobsCancel(gpa, request, opts.dispatcher, m.id orelse return respondNotFound(gpa, request)),
+        .jobs_logs => respondJobsLogs(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .jobs_stream => respondJobsStream(io, db, request, req_mutex, m.id orelse return respondNotFound(gpa, request)),
+        .stats_overview => respondStatsOverview(gpa, db, request),
+        .stats_project => respondStatsProject(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .stats_timeseries => respondStatsTimeseries(gpa, db, request),
+        .stats_slow => respondStatsSlow(gpa, db, request),
         .not_found => {
             // Strip any `?query` before the on-disk lookup: SvelteKit/Vite assets
             // carry cache-busting params (e.g. app.js?v=2) that would otherwise
@@ -297,6 +321,42 @@ fn extractBoundary(content_type: []const u8) ?[]const u8 {
     var end = after;
     while (end < content_type.len and content_type[end] != ';' and content_type[end] != ' ') : (end += 1) {}
     return content_type[after..end];
+}
+
+/// Return the value of `?<name>=<value>` from a target like `/path?from=2026-05-01&to=2026-05-29`.
+/// Returns null if absent. Does NOT URL-decode the value.
+fn extractQueryParam(target: []const u8, name: []const u8) ?[]const u8 {
+    const q = std.mem.indexOfScalar(u8, target, '?') orelse return null;
+    var it = std.mem.tokenizeScalar(u8, target[q + 1 ..], '&');
+    while (it.next()) |kv| {
+        const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
+        if (std.mem.eql(u8, kv[0..eq], name)) return kv[eq + 1 ..];
+    }
+    return null;
+}
+
+fn writeKindTotals(w: *std.Io.Writer, k: stats_mod.KindTotals) !void {
+    try w.writeAll("{\"kind\":");
+    try json.writeJsonString(w, k.kind);
+    try w.print(",\"runs\":{d},\"in_tokens\":{d},\"out_tokens\":{d},\"cost_usd\":{d},\"avg_latency_s\":{d}}}", .{
+        k.runs, k.in_tokens, k.out_tokens, k.cost_usd, k.avg_latency_s,
+    });
+}
+
+fn writeModelTotals(w: *std.Io.Writer, m: stats_mod.ModelTotals) !void {
+    try w.writeAll("{\"model\":");
+    try json.writeJsonString(w, m.model);
+    try w.print(",\"runs\":{d},\"in_tokens\":{d},\"out_tokens\":{d},\"cost_usd\":{d}}}", .{
+        m.runs, m.in_tokens, m.out_tokens, m.cost_usd,
+    });
+}
+
+fn writeProjectTotals(w: *std.Io.Writer, p: stats_mod.ProjectTotals) !void {
+    try w.writeAll("{\"project_id\":");
+    try json.writeJsonString(w, p.project_id);
+    try w.print(",\"ocr_cost_usd\":{d},\"prompt_cost_usd\":{d},\"total_in_tokens\":{d},\"total_out_tokens\":{d},\"ocr_runs\":{d},\"prompt_runs\":{d}}}", .{
+        p.ocr_cost_usd, p.prompt_cost_usd, p.total_in_tokens, p.total_out_tokens, p.ocr_runs, p.prompt_runs,
+    });
 }
 
 fn respondError(
@@ -675,6 +735,560 @@ fn respondProjectsSlicesDelete(
         return respondError(request, status, code, "Slice not deleted");
     };
     try request.respond("", .{ .status = .no_content, .extra_headers = &cors_headers });
+}
+
+fn respondProjectsJobsOcr(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+) !void {
+    var read_buf: [4096]u8 = undefined;
+    const body_reader = request.readerExpectNone(&read_buf);
+    const body = body_reader.allocRemaining(gpa, .limited(1 * 1024 * 1024)) catch {
+        return respondError(request, .bad_request, "INVALID_REQUEST", "Body too large or unreadable");
+    };
+    defer gpa.free(body);
+
+    var result = handlers_ocr.handleEnqueueOcr(io, gpa, db, project_id, body) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.InvalidRequest => .bad_request,
+            error.ProjectNotFound, error.SliceNotFound => .not_found,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.InvalidRequest => "INVALID_REQUEST",
+            error.ProjectNotFound => "NOT_FOUND",
+            error.SliceNotFound => "NOT_FOUND",
+            else => "INTERNAL_ERROR",
+        };
+        const message: []const u8 = switch (err) {
+            error.InvalidRequest => "Invalid request body",
+            error.ProjectNotFound => "Project not found",
+            error.SliceNotFound => "Slice not found",
+            else => "Internal error",
+        };
+        return respondError(request, status, code, message);
+    };
+    defer result.deinit(gpa);
+
+    var resp_buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&resp_buf);
+    try json.writeJobCreated(&w, result.job_id);
+    const resp_body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(resp_body, .{ .status = .created, .extra_headers = &headers });
+}
+
+fn respondProjectsJobsOcrAll(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+) !void {
+    var result = handlers_ocr.handleEnqueueOcrAll(io, gpa, db, project_id) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.ProjectNotFound => .not_found,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.ProjectNotFound => "NOT_FOUND",
+            else => "INTERNAL_ERROR",
+        };
+        const message: []const u8 = switch (err) {
+            error.ProjectNotFound => "Project not found",
+            else => "Internal error",
+        };
+        return respondError(request, status, code, message);
+    };
+    defer result.deinit(gpa);
+
+    // Build {"job_ids":["id1","id2",...]}
+    var buf: [16 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.writeAll("{\"job_ids\":[");
+    for (result.job_ids, 0..) |jid, i| {
+        if (i > 0) try w.writeAll(",");
+        try json.writeJsonString(&w, jid);
+    }
+    try w.writeAll("]}");
+    const resp_body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(resp_body, .{ .status = .created, .extra_headers = &headers });
+}
+
+fn respondProjectsExtractionsList(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+) !void {
+    const list = handlers_ocr.handleListExtractions(gpa, db, project_id) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.ProjectNotFound => .not_found,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.ProjectNotFound => "NOT_FOUND",
+            else => "INTERNAL_ERROR",
+        };
+        return respondError(request, status, code, "Extractions unavailable");
+    };
+    defer extractions_mod.deinitList(list, gpa);
+
+    var buf: [256 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.writeAll("[");
+    for (list, 0..) |e, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"project_id\":");
+        try json.writeJsonString(&w, e.project_id);
+        try w.writeAll(",\"slice_filename\":");
+        try json.writeJsonString(&w, e.slice_filename);
+        try w.writeAll(",\"markdown_path\":");
+        try json.writeJsonString(&w, e.markdown_path);
+        try w.writeAll(",\"meta_path\":");
+        try json.writeJsonString(&w, e.meta_path);
+        try w.writeAll(",\"model\":");
+        try json.writeJsonString(&w, e.model);
+        try w.print(",\"pages\":{d},\"page_markers_found\":{d}", .{ e.pages, e.page_markers_found });
+        try w.writeAll(",\"input_tokens\":");
+        if (e.input_tokens) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.writeAll(",\"output_tokens\":");
+        if (e.output_tokens) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.writeAll(",\"input_cost_usd\":");
+        if (e.input_cost_usd) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.writeAll(",\"output_cost_usd\":");
+        if (e.output_cost_usd) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.print(",\"latency_s\":{d}", .{e.latency_s});
+        try w.writeAll(",\"created_at\":");
+        try json.writeJsonString(&w, e.created_at);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+    const resp_body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(resp_body, .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondProjectsExtractionsGet(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+    slice_filename: []const u8,
+) !void {
+    const result = handlers_ocr.handleGetExtractionMarkdown(io, gpa, db, project_id, slice_filename) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.ProjectNotFound, error.ExtractionNotFound => .not_found,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.ProjectNotFound, error.ExtractionNotFound => "NOT_FOUND",
+            else => "INTERNAL_ERROR",
+        };
+        return respondError(request, status, code, "Extraction not available");
+    };
+    defer result.deinit(gpa);
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "text/plain; charset=utf-8" },
+    } ++ cors_headers;
+
+    try request.respond(result.markdown_bytes, .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondProjectsJobsPrompt(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+) !void {
+    var read_buf: [4096]u8 = undefined;
+    const body_reader = request.readerExpectNone(&read_buf);
+    const body = body_reader.allocRemaining(gpa, .limited(1 * 1024 * 1024)) catch {
+        return respondError(request, .bad_request, "INVALID_REQUEST", "Body too large or unreadable");
+    };
+    defer gpa.free(body);
+
+    var result = handlers_prompts.handleEnqueuePrompt(io, gpa, db, project_id, body) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.InvalidRequest => .bad_request,
+            error.ProjectNotFound => .not_found,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.InvalidRequest => "INVALID_REQUEST",
+            error.ProjectNotFound => "NOT_FOUND",
+            else => "INTERNAL_ERROR",
+        };
+        const message: []const u8 = switch (err) {
+            error.InvalidRequest => "Invalid or unknown prompt_name",
+            error.ProjectNotFound => "Project not found",
+            else => "Internal error",
+        };
+        return respondError(request, status, code, message);
+    };
+    defer result.deinit(gpa);
+
+    var resp_buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&resp_buf);
+    try json.writeJobCreated(&w, result.job_id);
+    const resp_body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(resp_body, .{ .status = .created, .extra_headers = &headers });
+}
+
+fn respondProjectsJobsPromptAll(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+) !void {
+    var result = handlers_prompts.handleEnqueuePromptAll(io, gpa, db, project_id) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.ProjectNotFound => .not_found,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.ProjectNotFound => "NOT_FOUND",
+            else => "INTERNAL_ERROR",
+        };
+        const message: []const u8 = switch (err) {
+            error.ProjectNotFound => "Project not found",
+            else => "Internal error",
+        };
+        return respondError(request, status, code, message);
+    };
+    defer result.deinit(gpa);
+
+    // Build {"job_ids":["id1","id2",...]}
+    var buf: [16 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.writeAll("{\"job_ids\":[");
+    for (result.job_ids, 0..) |jid, i| {
+        if (i > 0) try w.writeAll(",");
+        try json.writeJsonString(&w, jid);
+    }
+    try w.writeAll("]}");
+    const resp_body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(resp_body, .{ .status = .created, .extra_headers = &headers });
+}
+
+fn respondProjectsPromptsList(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+) !void {
+    const list = handlers_prompts.handleListPrompts(gpa, db, project_id) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.ProjectNotFound => .not_found,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.ProjectNotFound => "NOT_FOUND",
+            else => "INTERNAL_ERROR",
+        };
+        return respondError(request, status, code, "Prompts unavailable");
+    };
+    defer prompt_outputs_mod.deinitList(list, gpa);
+
+    var buf: [256 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.writeAll("[");
+    for (list, 0..) |p, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"project_id\":");
+        try json.writeJsonString(&w, p.project_id);
+        try w.writeAll(",\"prompt_name\":");
+        try json.writeJsonString(&w, p.prompt_name);
+        try w.writeAll(",\"markdown_path\":");
+        try json.writeJsonString(&w, p.markdown_path);
+        try w.writeAll(",\"model\":");
+        try json.writeJsonString(&w, p.model);
+        try w.writeAll(",\"input_tokens\":");
+        if (p.input_tokens) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.writeAll(",\"output_tokens\":");
+        if (p.output_tokens) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.writeAll(",\"input_cost_usd\":");
+        if (p.input_cost_usd) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.writeAll(",\"output_cost_usd\":");
+        if (p.output_cost_usd) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.print(",\"latency_s\":{d}", .{p.latency_s});
+        try w.writeAll(",\"warnings\":");
+        try w.writeAll(p.warnings_json);
+        try w.writeAll(",\"created_at\":");
+        try json.writeJsonString(&w, p.created_at);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+    const resp_body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(resp_body, .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondProjectsPromptsGet(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+    prompt_name: []const u8,
+) !void {
+    const result = handlers_prompts.handleGetPromptMarkdown(io, gpa, db, project_id, prompt_name) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.ProjectNotFound, error.PromptNotFound => .not_found,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.ProjectNotFound, error.PromptNotFound => "NOT_FOUND",
+            else => "INTERNAL_ERROR",
+        };
+        return respondError(request, status, code, "Prompt output not available");
+    };
+    defer result.deinit(gpa);
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "text/plain; charset=utf-8" },
+    } ++ cors_headers;
+
+    try request.respond(result.markdown_bytes, .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondJobsCancel(
+    gpa: std.mem.Allocator,
+    request: *http.Server.Request,
+    dispatcher: ?*@import("../agents/dispatcher.zig").Dispatcher,
+    job_id: []const u8,
+) !void {
+    _ = gpa;
+    const status_code = handlers_jobs.handleCancelJob(dispatcher, job_id) catch {
+        return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Internal error");
+    };
+    if (status_code == 202) {
+        const headers = [_]std.http.Header{
+            .{ .name = "Content-Type", .value = "application/json" },
+        } ++ cors_headers;
+        try request.respond("{\"status\":\"canceling\"}", .{
+            .status = .accepted,
+            .extra_headers = &headers,
+        });
+    } else {
+        // 503: dispatcher not yet wired. Return a descriptive error.
+        return respondError(request, .service_unavailable, "SERVICE_UNAVAILABLE", "Dispatcher not available");
+    }
+}
+
+fn respondJobsLogs(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    job_id: []const u8,
+) !void {
+    const result = handlers_jobs.handleGetLogs(gpa, db, job_id) catch {
+        return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Internal error");
+    };
+    defer result.deinit(gpa);
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(result.json_body, .{
+        .status = .ok,
+        .extra_headers = &headers,
+    });
+}
+
+fn respondJobsStream(
+    io: std.Io,
+    db: *Db,
+    request: *http.Server.Request,
+    req_mutex: *std.Io.Mutex,
+    job_id: []const u8,
+) !void {
+    const sse_headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "text/event-stream" },
+        .{ .name = "Cache-Control", .value = "no-cache" },
+        .{ .name = "Connection", .value = "keep-alive" },
+    } ++ cors_headers;
+
+    // respondStreaming uses chunked transfer encoding by default (no content-length).
+    // Provide a 4 KiB write buffer.
+    var body_buf: [4096]u8 = undefined;
+    var body_writer = try request.respondStreaming(&body_buf, .{
+        .respond_options = .{
+            .status = .ok,
+            .extra_headers = &sse_headers,
+        },
+    });
+
+    // streamJob manages the mutex: it holds it for DB queries and releases it
+    // during each 500 ms sleep. It always unlocks before returning.
+    sse.streamJob(db, req_mutex, io, job_id, &body_writer.writer);
+
+    // Re-acquire the mutex so the `defer req_mutex.unlock(io)` in
+    // handleConnection can perform its paired unlock cleanly.
+    req_mutex.lockUncancelable(io);
+
+    // Finalize the chunked stream (writes the terminal zero-length chunk).
+    body_writer.end() catch {};
+}
+
+fn respondStatsOverview(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+) !void {
+    var ov = handlers_stats.getOverview(db, gpa) catch {
+        return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Stats unavailable");
+    };
+    defer ov.deinit(gpa);
+
+    var buf: [128 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+
+    try w.writeAll("{\"lifetime\":{\"ocr\":");
+    try writeKindTotals(&w, ov.lifetime.ocr);
+    try w.writeAll(",\"prompt\":");
+    try writeKindTotals(&w, ov.lifetime.prompt);
+    try w.writeAll("},\"per_model\":[");
+    for (ov.per_model, 0..) |m, i| {
+        if (i > 0) try w.writeAll(",");
+        try writeModelTotals(&w, m);
+    }
+    try w.writeAll("],\"top_projects\":[");
+    for (ov.top_projects, 0..) |p, i| {
+        if (i > 0) try w.writeAll(",");
+        try writeProjectTotals(&w, p);
+    }
+    try w.writeAll("]}");
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+    try request.respond(w.buffered(), .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondStatsProject(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+) !void {
+    var pt = handlers_stats.getProject(db, gpa, project_id) catch {
+        return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Stats unavailable");
+    };
+    defer pt.deinit(gpa);
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeProjectTotals(&w, pt);
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+    try request.respond(w.buffered(), .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondStatsTimeseries(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+) !void {
+    const from = extractQueryParam(request.head.target, "from") orelse "1970-01-01";
+    const to = extractQueryParam(request.head.target, "to") orelse "9999-12-31";
+
+    const list = handlers_stats.getTimeseries(db, gpa, from, to) catch {
+        return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Timeseries unavailable");
+    };
+    defer stats_mod.deinitTimeseries(list, gpa);
+
+    var buf: [64 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.writeAll("[");
+    for (list, 0..) |d, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"day\":");
+        try json.writeJsonString(&w, d.day);
+        try w.print(",\"in_tokens\":{d},\"out_tokens\":{d},\"cost_usd\":{d}}}", .{
+            d.in_tokens, d.out_tokens, d.cost_usd,
+        });
+    }
+    try w.writeAll("]");
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+    try request.respond(w.buffered(), .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondStatsSlow(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+) !void {
+    var limit: u32 = 20;
+    if (extractQueryParam(request.head.target, "limit")) |lim| {
+        limit = std.fmt.parseInt(u32, lim, 10) catch 20;
+        if (limit == 0 or limit > 200) limit = 20;
+    }
+    const list = handlers_stats.getSlow(db, gpa, limit) catch {
+        return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Slow jobs unavailable");
+    };
+    defer stats_mod.deinitSlowJobList(list, gpa);
+
+    var buf: [64 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.writeAll("[");
+    for (list, 0..) |s, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"kind\":");
+        try json.writeJsonString(&w, s.kind);
+        try w.writeAll(",\"project_id\":");
+        try json.writeJsonString(&w, s.project_id);
+        try w.writeAll(",\"subject\":");
+        try json.writeJsonString(&w, s.subject);
+        try w.writeAll(",\"model\":");
+        try json.writeJsonString(&w, s.model);
+        try w.print(",\"latency_s\":{d},\"total_tokens\":{d}", .{ s.latency_s, s.total_tokens });
+        try w.writeAll(",\"created_at\":");
+        try json.writeJsonString(&w, s.created_at);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+    try request.respond(w.buffered(), .{ .status = .ok, .extra_headers = &headers });
 }
 
 fn respondNotFound(gpa: std.mem.Allocator, request: *http.Server.Request) !void {

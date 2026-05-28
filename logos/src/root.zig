@@ -16,3 +16,18 @@ pub fn add(a: i32, b: i32) i32 {
 test "basic add functionality" {
     try std.testing.expect(add(3, 7) == 10);
 }
+
+pub const extractions = @import("db/extractions.zig");
+pub const handlers_ocr = @import("api/handlers_ocr.zig");
+pub const handlers_prompts = @import("api/handlers_prompts.zig");
+pub const prompt_outputs = @import("db/prompt_outputs.zig");
+pub const job_logs = @import("db/job_logs.zig");
+pub const pricing = @import("agents/pricing.zig");
+pub const jsonrpc = @import("agents/jsonrpc.zig");
+pub const agent_config = @import("agents/config.zig");
+pub const event_channel = @import("agents/event_channel.zig");
+pub const worker = @import("agents/worker.zig");
+pub const supervisor = @import("agents/supervisor.zig");
+pub const dispatcher = @import("agents/dispatcher.zig");
+pub const handlers_jobs = @import("api/handlers_jobs.zig");
+pub const sse = @import("api/sse.zig");

@@ -2,6 +2,12 @@ const std = @import("std");
 const AppConfig = @import("config.zig").AppConfig;
 const lock = @import("lock.zig");
 const Db = @import("db/db.zig").Db;
+const db_mod = @import("db/db.zig");
+const jobs_mod = @import("db/jobs.zig");
+const agent_config_mod = @import("agents/config.zig");
+const event_channel_mod = @import("agents/event_channel.zig");
+const supervisor_mod = @import("agents/supervisor.zig");
+const dispatcher_mod = @import("agents/dispatcher.zig");
 
 const version = "0.1.0";
 const default_port: u16 = 7777;
@@ -103,12 +109,44 @@ pub fn main(init: std.process.Init) !void {
     var db = try Db.open(db_path);
     defer db.close();
 
+    // 1. Daemon-restart cleanup: mark in-flight jobs from a previous run as failed.
+    const now_str = try db_mod.nowIso8601(gpa);
+    defer gpa.free(now_str);
+    try jobs_mod.markStuckJobsFailed(&db, now_str);
+
+    // 2. Load the agent config (with hardcoded fallback if agents.json is missing).
+    var agent_cfg = try agent_config_mod.loadFromDir(io, gpa, config.data_dir);
+    defer agent_cfg.deinit(gpa);
+
+    // 3. Initialize the shared DB mutex, event channel, and supervisor.
+    //    req_mutex serializes DB access across the HTTP threads AND the dispatcher thread.
+    var req_mutex: std.Io.Mutex = .init;
+
+    var event_ch = event_channel_mod.EventChannel.init(gpa, io);
+    defer event_ch.deinit();
+
+    var sup = supervisor_mod.Supervisor.init(io, gpa, &agent_cfg, &event_ch);
+
+    // 4. Initialize the dispatcher.
+    var disp = dispatcher_mod.Dispatcher.init(io, gpa, &db, &req_mutex, &sup, &event_ch);
+    defer disp.deinit();
+
+    // 5. Spawn the dispatcher thread.
+    const disp_thread = try std.Thread.spawn(.{}, dispatcher_mod.Dispatcher.run, .{&disp});
+
+    // 6. Graceful shutdown when the HTTP loop exits (Ctrl+C / SIGINT).
+    defer {
+        disp.requestStop();
+        disp_thread.join();
+        sup.shutdownAll();
+    }
+
     try stdout.print("daemon running: pid={d} port={d} data_dir={s}\n", .{ getpid(), port, config.data_dir });
     try stdout.print("(ctrl-C to exit)\n", .{});
     try stdout_writer.flush();
 
     const api_server = @import("api/server.zig");
-    api_server.serve(io, gpa, &db, .{ .port = port, .version = version, .data_dir = config.data_dir, .ui_dir = config.ui_dir }) catch |err| switch (err) {
+    api_server.serve(io, gpa, &db, &req_mutex, .{ .port = port, .version = version, .data_dir = config.data_dir, .ui_dir = config.ui_dir, .dispatcher = &disp }) catch |err| switch (err) {
         error.AddressInUse => {
             // We hold the lock for THIS data_dir, but the port is taken by some
             // other process (e.g. a daemon left running on another data_dir, or
@@ -138,10 +176,27 @@ test {
     _ = @import("db/projects.zig");
     _ = @import("db/slices.zig");
     _ = @import("db/jobs.zig");
+    _ = @import("db/extractions.zig");
+    _ = @import("db/prompt_outputs.zig");
+    _ = @import("db/stats.zig");
+    _ = @import("db/job_logs.zig");
+    _ = @import("agents/pricing.zig");
+    _ = @import("agents/jsonrpc.zig");
+    _ = @import("agents/config.zig");
+    _ = @import("agents/event_channel.zig");
+    _ = @import("agents/worker.zig");
+    _ = @import("agents/supervisor.zig");
+    _ = @import("agents/dispatcher.zig");
+    _ = @import("agents/integration_test.zig");
     _ = @import("api/json.zig");
     _ = @import("api/router.zig");
     _ = @import("api/multipart.zig");
     _ = @import("api/static.zig");
+    _ = @import("api/handlers_ocr.zig");
+    _ = @import("api/handlers_prompts.zig");
+    _ = @import("api/handlers_jobs.zig");
+    _ = @import("api/handlers_stats.zig");
+    _ = @import("api/sse.zig");
     _ = @import("ids.zig");
     _ = @import("storage/project_dir.zig");
 }

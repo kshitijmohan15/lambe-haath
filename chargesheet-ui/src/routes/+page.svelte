@@ -20,12 +20,20 @@
 			<h1 class="text-2xl font-semibold text-gray-900">Projects</h1>
 			<p class="text-sm text-gray-500">One chargesheet per project.</p>
 		</div>
-		<a
-			href="/new"
-			class="inline-flex items-center rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-		>
-			+ New project
-		</a>
+		<div class="flex items-center gap-3">
+			<a
+				href="/stats"
+				class="text-sm text-gray-600 hover:text-gray-900"
+			>
+				Stats
+			</a>
+			<a
+				href="/new"
+				class="inline-flex items-center rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+			>
+				+ New project
+			</a>
+		</div>
 	</div>
 
 	{#if projectsStore.loading && projectsStore.projects.length === 0}
