@@ -97,3 +97,9 @@ export async function apiFetch<T>(
 export async function apiFetchVoid(path: string, init: RequestInit): Promise<void> {
 	await executeRequest(path, init);
 }
+
+/** Fetch a text response (e.g., raw Markdown). Throws DaemonError on non-2xx. */
+export async function apiFetchText(path: string, init: RequestInit): Promise<string> {
+	const response = await executeRequest(path, init);
+	return await response.text();
+}
