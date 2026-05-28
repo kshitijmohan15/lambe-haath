@@ -144,6 +144,7 @@ test {
     _ = @import("agents/pricing.zig");
     _ = @import("agents/jsonrpc.zig");
     _ = @import("agents/config.zig");
+    _ = @import("agents/event_channel.zig");
     _ = @import("api/json.zig");
     _ = @import("api/router.zig");
     _ = @import("api/multipart.zig");
