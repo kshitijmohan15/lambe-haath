@@ -22,3 +22,4 @@ pub const prompt_outputs = @import("db/prompt_outputs.zig");
 pub const job_logs = @import("db/job_logs.zig");
 pub const pricing = @import("agents/pricing.zig");
 pub const jsonrpc = @import("agents/jsonrpc.zig");
+pub const agent_config = @import("agents/config.zig");

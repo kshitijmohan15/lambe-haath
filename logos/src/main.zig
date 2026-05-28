@@ -143,6 +143,7 @@ test {
     _ = @import("db/job_logs.zig");
     _ = @import("agents/pricing.zig");
     _ = @import("agents/jsonrpc.zig");
+    _ = @import("agents/config.zig");
     _ = @import("api/json.zig");
     _ = @import("api/router.zig");
     _ = @import("api/multipart.zig");
