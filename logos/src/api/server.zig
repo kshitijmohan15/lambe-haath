@@ -25,6 +25,7 @@ const static = @import("static.zig");
 const slices_mod = @import("../db/slices.zig");
 const extractions_mod = @import("../db/extractions.zig");
 const prompt_outputs_mod = @import("../db/prompt_outputs.zig");
+const Dispatcher = @import("../agents/dispatcher.zig").Dispatcher;
 
 const cors_origin = "http://localhost:5173";
 
@@ -39,6 +40,7 @@ pub const ServeOptions = struct {
     version: []const u8,
     data_dir: []const u8,
     ui_dir: []const u8,
+    dispatcher: ?*Dispatcher = null,
 };
 
 /// Bind 0.0.0.0:port and serve connections forever. Returns only on fatal error.
@@ -53,7 +55,7 @@ pub const ServeOptions = struct {
 /// concurrently regardless of SQLite's compiled thread mode. Trade-off: a slow
 /// request (e.g. a sync slice job) briefly serializes other requests — fine for
 /// a single-user local tool.
-pub fn serve(io: std.Io, gpa: std.mem.Allocator, db: *Db, opts: ServeOptions) !void {
+pub fn serve(io: std.Io, gpa: std.mem.Allocator, db: *Db, req_mutex: *std.Io.Mutex, opts: ServeOptions) !void {
     const address = try net.IpAddress.parseIp4("0.0.0.0", opts.port);
     // reuse_address=false so a second daemon on the same port fails loudly with
     // AddressInUse. The lock file alone only guards same-data_dir collisions —
@@ -64,13 +66,12 @@ pub fn serve(io: std.Io, gpa: std.mem.Allocator, db: *Db, opts: ServeOptions) !v
 
     std.log.info("HTTP listening on http://0.0.0.0:{d}/", .{opts.port});
 
-    var req_mutex: std.Io.Mutex = .init;
     while (true) {
         const stream = tcp_server.accept(io) catch |err| {
             std.log.err("accept failed: {t}", .{err});
             continue;
         };
-        const thread = std.Thread.spawn(.{}, handleConnection, .{ io, gpa, db, stream, opts, &req_mutex }) catch |err| {
+        const thread = std.Thread.spawn(.{}, handleConnection, .{ io, gpa, db, stream, opts, req_mutex }) catch |err| {
             std.log.err("connection thread spawn failed: {t}", .{err});
             var copy = stream;
             copy.close(io);
@@ -153,9 +154,7 @@ fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Serv
         .projects_jobs_prompt_all => respondProjectsJobsPromptAll(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .projects_prompts_list => respondProjectsPromptsList(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .projects_prompts_get => respondProjectsPromptsGet(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
-        // TODO(Task 12): pass the real dispatcher pointer once wired in main.zig.
-        // For now, dispatcher=null causes the cancel handler to return 503.
-        .jobs_cancel => respondJobsCancel(gpa, request, null, m.id orelse return respondNotFound(gpa, request)),
+        .jobs_cancel => respondJobsCancel(gpa, request, opts.dispatcher, m.id orelse return respondNotFound(gpa, request)),
         .jobs_logs => respondJobsLogs(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .jobs_stream => respondJobsStream(io, db, request, req_mutex, m.id orelse return respondNotFound(gpa, request)),
         .not_found => {
@@ -1029,8 +1028,7 @@ fn respondJobsCancel(
     job_id: []const u8,
 ) !void {
     _ = gpa;
-    const status_code = handlers_jobs.handleCancelJob(dispatcher, job_id) catch |err| {
-        _ = err;
+    const status_code = handlers_jobs.handleCancelJob(dispatcher, job_id) catch {
         return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Internal error");
     };
     if (status_code == 202) {
@@ -1053,8 +1051,7 @@ fn respondJobsLogs(
     request: *http.Server.Request,
     job_id: []const u8,
 ) !void {
-    const result = handlers_jobs.handleGetLogs(gpa, db, job_id) catch |err| {
-        _ = err;
+    const result = handlers_jobs.handleGetLogs(gpa, db, job_id) catch {
         return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Internal error");
     };
     defer result.deinit(gpa);
