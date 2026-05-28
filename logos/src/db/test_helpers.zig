@@ -8,6 +8,15 @@ pub fn openTestDb() !Db {
     return Db.open(":memory:");
 }
 
+/// Insert a minimal project row for use in tests that need a valid project_id FK.
+pub fn insertProject(db: *Db, id: []const u8) !void {
+    try db.conn.exec(
+        \\INSERT INTO projects (id, name, created_at, last_opened_at,
+        \\  chargesheet_filename, chargesheet_page_count, chargesheet_size_bytes)
+        \\VALUES (?, ?, '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z', 'c.pdf', 1, 1)
+    , .{ id, id });
+}
+
 test "openTestDb yields a database with foreign_keys ON" {
     var db = try openTestDb();
     defer db.close();
