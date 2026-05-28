@@ -128,7 +128,7 @@ pub fn main(init: std.process.Init) !void {
     var sup = supervisor_mod.Supervisor.init(io, gpa, &agent_cfg, &event_ch);
 
     // 4. Initialize the dispatcher.
-    var disp = dispatcher_mod.Dispatcher.init(io, gpa, &db, &req_mutex, &sup, &event_ch);
+    var disp = dispatcher_mod.Dispatcher.init(io, gpa, &db, &req_mutex, &sup, &event_ch, config.data_dir);
     defer disp.deinit();
 
     // 5. Spawn the dispatcher thread.
@@ -187,6 +187,7 @@ test {
     _ = @import("agents/worker.zig");
     _ = @import("agents/supervisor.zig");
     _ = @import("agents/dispatcher.zig");
+    _ = @import("agents/agent_params.zig");
     _ = @import("agents/integration_test.zig");
     _ = @import("api/json.zig");
     _ = @import("api/router.zig");
