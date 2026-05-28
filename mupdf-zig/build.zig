@@ -81,6 +81,14 @@ pub fn linkMupdf(b: *std.Build, m: *std.Build.Module, mupdf_src: *std.Build.Depe
         "RANLIB=zig ranlib",
         "HAVE_GLUT=no",
         "HAVE_X11=no",
+        // Embed fonts via the hexdump->C path (compiled by our target CC) rather
+        // than `ld -r -b binary`, which MuPDF auto-selects when objcopy is present
+        // (e.g. on Linux). That binary-embed produces HOST-format objects: cross-
+        // compiling to Windows from a Linux host yields ELF font objects that
+        // lld-link rejects ("unknown file type: Noto*.otf.o"). Forcing this off
+        // makes font objects target-correct on every host (matches the macOS-host
+        // behavior that the cross-compile validation relied on).
+        "HAVE_OBJCOPY=no",
         "-j8",
     });
     // Direct MuPDF to write its objects + static libs into a zig-managed output

@@ -33,15 +33,23 @@ try {
     $a = Invoke-WebRequest "$base$asset" -UseBasicParsing
     if ($a.Headers['Content-Type'] -notmatch 'text/javascript') { throw "asset mime: $($a.Headers['Content-Type'])" }
 
-    $form = @{ name = 'Smoke'; chargesheet = Get-Item $fixture }
-    $created = Invoke-RestMethod "$base/api/v1/projects" -Method Post -Form $form
-    if ($created.chargesheet.page_count -ne 10) { throw "page_count: $($created.chargesheet.page_count)" }
-    $proj = $created.id
+    # Upload via curl.exe (bundled on Windows), NOT Invoke-RestMethod -Form:
+    # .NET's MultipartFormDataContent encodes parts differently than curl and
+    # browsers, which our multipart parser (matching the real browser client)
+    # rejects. curl.exe sends the same wire format as the macOS/Linux smoke and a
+    # real browser.
+    $created = & curl.exe -s -X POST "$base/api/v1/projects" -F "name=Smoke" -F "chargesheet=@$fixture;type=application/pdf"
+    if ($LASTEXITCODE -ne 0) { throw "curl upload failed (exit $LASTEXITCODE)" }
+    if ($created -notmatch '"page_count":10') { throw "page_count: $created" }
+    $proj = ([regex]'"id":"([^"]+)"').Match($created).Groups[1].Value
+    if (-not $proj) { throw "no project id: $created" }
 
     $body = '{"slices":[{"filename":"page1.pdf","start_page":1,"end_page":1}]}'
-    Invoke-RestMethod "$base/api/v1/projects/$proj/jobs/slice" -Method Post -ContentType 'application/json' -Body $body | Out-Null
+    & curl.exe -s -X POST "$base/api/v1/projects/$proj/jobs/slice" -H "Content-Type: application/json" -d $body | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "slice request failed" }
     $slicePath = Join-Path $data 'page1.pdf'
-    Invoke-WebRequest "$base/api/v1/projects/$proj/slices/page1.pdf" -OutFile $slicePath -UseBasicParsing
+    & curl.exe -s -o $slicePath "$base/api/v1/projects/$proj/slices/page1.pdf"
+    if ($LASTEXITCODE -ne 0) { throw "slice download failed" }
     $sliceSize = (Get-Item $slicePath).Length
     $srcSize = (Get-Item $fixture).Length
     if ($sliceSize -le 0 -or $sliceSize -ge $srcSize) { throw "slice size $sliceSize not smaller than source $srcSize" }
