@@ -160,7 +160,7 @@ pub fn handleEnqueueOcrAll(
         \\LEFT JOIN extractions e
         \\  ON e.project_id = s.project_id AND e.slice_filename = s.filename
         \\WHERE s.project_id = ? AND e.slice_filename IS NULL
-        \\ORDER BY s.created_at ASC
+        \\ORDER BY s.filename ASC
     , .{project_id}) catch return error.DbError;
     defer rows.deinit();
 
