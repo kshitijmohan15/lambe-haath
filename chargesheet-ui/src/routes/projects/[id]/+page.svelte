@@ -3,6 +3,9 @@
 	import PdfViewer from '$lib/components/PdfViewer.svelte';
 	import SliceList from '$lib/components/SliceList.svelte';
 	import ProducedSlices from '$lib/components/ProducedSlices.svelte';
+	import Tabs from '$lib/components/Tabs.svelte';
+	import ExtractionsPanel from '$lib/components/ExtractionsPanel.svelte';
+	import PromptsPanel from '$lib/components/PromptsPanel.svelte';
 	import { pdfStore } from '$lib/stores/pdf.svelte';
 	import { slicesStore } from '$lib/stores/slices.svelte';
 	import { toastsStore } from '$lib/stores/toasts.svelte';
@@ -14,6 +17,7 @@
 
 	let submitting = $state(false);
 	let producedReloadKey = $state(0);
+	let activeTab = $state<'slice' | 'extractions' | 'prompts'>('slice');
 
 	async function trySubmit() {
 		if (submitting || pdfStore.pageCount === null) return;
@@ -36,6 +40,7 @@
 	}
 
 	function onKeydown(e: KeyboardEvent) {
+		if (activeTab !== 'slice') return;
 		const tgt = e.target as HTMLElement | null;
 		if (tgt) {
 			const tag = tgt.tagName;
@@ -76,21 +81,38 @@
 		</div>
 	</header>
 
-	<div class="grid min-h-0 flex-1" style="grid-template-columns: 3fr 2fr;">
-		<div class="min-h-0">
-			<PdfViewer
-				pdfUrl={chargesheetUrl(project.id)}
-				bind:currentPage={pdfStore.currentPage}
-				bind:pageCount={pdfStore.pageCount}
-				bind:loading={pdfStore.loading}
-				bind:error={pdfStore.error}
-			/>
-		</div>
-		<div class="flex min-h-0 flex-col border-l border-gray-200 bg-white">
-			<div class="flex min-h-0 flex-1 flex-col">
-				<SliceList onSubmit={trySubmit} {submitting} />
+	<Tabs
+		tabs={[
+			{ key: 'slice', label: 'Slice' },
+			{ key: 'extractions', label: 'Extractions' },
+			{ key: 'prompts', label: 'Prompts' },
+		]}
+		bind:active={activeTab}
+	/>
+
+	<div class="min-h-0 flex-1">
+		{#if activeTab === 'slice'}
+			<div class="grid h-full min-h-0" style="grid-template-columns: 3fr 2fr;">
+				<div class="min-h-0">
+					<PdfViewer
+						pdfUrl={chargesheetUrl(project.id)}
+						bind:currentPage={pdfStore.currentPage}
+						bind:pageCount={pdfStore.pageCount}
+						bind:loading={pdfStore.loading}
+						bind:error={pdfStore.error}
+					/>
+				</div>
+				<div class="flex min-h-0 flex-col border-l border-gray-200 bg-white">
+					<div class="flex min-h-0 flex-1 flex-col">
+						<SliceList onSubmit={trySubmit} {submitting} />
+					</div>
+					<ProducedSlices projectId={project.id} reloadKey={producedReloadKey} />
+				</div>
 			</div>
-			<ProducedSlices projectId={project.id} reloadKey={producedReloadKey} />
-		</div>
+		{:else if activeTab === 'extractions'}
+			<ExtractionsPanel projectId={project.id} />
+		{:else if activeTab === 'prompts'}
+			<PromptsPanel projectId={project.id} />
+		{/if}
 	</div>
 </div>
