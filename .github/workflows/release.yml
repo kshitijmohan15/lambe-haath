@@ -150,6 +150,7 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.sha256
             dist/SHA256SUMS
 
   install-verify:
