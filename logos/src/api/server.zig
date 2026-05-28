@@ -20,6 +20,7 @@ const handlers = @import("handlers.zig");
 const handlers_ocr = @import("handlers_ocr.zig");
 const handlers_prompts = @import("handlers_prompts.zig");
 const handlers_jobs = @import("handlers_jobs.zig");
+const sse = @import("sse.zig");
 const static = @import("static.zig");
 const slices_mod = @import("../db/slices.zig");
 const extractions_mod = @import("../db/extractions.zig");
@@ -105,7 +106,7 @@ fn handleConnection(io: std.Io, gpa: std.mem.Allocator, db: *Db, stream: net.Str
         };
         req_mutex.lockUncancelable(io);
         defer req_mutex.unlock(io);
-        serveRequest(io, gpa, db, &request, opts) catch |err| {
+        serveRequest(io, gpa, db, &request, opts, req_mutex) catch |err| {
             std.log.err("serveRequest failed: {t}", .{err});
             return;
         };
@@ -122,7 +123,7 @@ fn methodFromHttp(m: http.Method) ?router.Method {
     };
 }
 
-fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Server.Request, opts: ServeOptions) !void {
+fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Server.Request, opts: ServeOptions, req_mutex: *std.Io.Mutex) !void {
     const target = request.head.target;
     std.log.info("{t} {s}", .{ request.head.method, target });
 
@@ -156,6 +157,7 @@ fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Serv
         // For now, dispatcher=null causes the cancel handler to return 503.
         .jobs_cancel => respondJobsCancel(gpa, request, null, m.id orelse return respondNotFound(gpa, request)),
         .jobs_logs => respondJobsLogs(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .jobs_stream => respondJobsStream(io, db, request, req_mutex, m.id orelse return respondNotFound(gpa, request)),
         .not_found => {
             // Strip any `?query` before the on-disk lookup: SvelteKit/Vite assets
             // carry cache-busting params (e.g. app.js?v=2) that would otherwise
@@ -1065,6 +1067,41 @@ fn respondJobsLogs(
         .status = .ok,
         .extra_headers = &headers,
     });
+}
+
+fn respondJobsStream(
+    io: std.Io,
+    db: *Db,
+    request: *http.Server.Request,
+    req_mutex: *std.Io.Mutex,
+    job_id: []const u8,
+) !void {
+    const sse_headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "text/event-stream" },
+        .{ .name = "Cache-Control", .value = "no-cache" },
+        .{ .name = "Connection", .value = "keep-alive" },
+    } ++ cors_headers;
+
+    // respondStreaming uses chunked transfer encoding by default (no content-length).
+    // Provide a 4 KiB write buffer.
+    var body_buf: [4096]u8 = undefined;
+    var body_writer = try request.respondStreaming(&body_buf, .{
+        .respond_options = .{
+            .status = .ok,
+            .extra_headers = &sse_headers,
+        },
+    });
+
+    // streamJob manages the mutex: it holds it for DB queries and releases it
+    // during each 500 ms sleep. It always unlocks before returning.
+    sse.streamJob(db, req_mutex, io, job_id, &body_writer.writer);
+
+    // Re-acquire the mutex so the `defer req_mutex.unlock(io)` in
+    // handleConnection can perform its paired unlock cleanly.
+    req_mutex.lockUncancelable(io);
+
+    // Finalize the chunked stream (writes the terminal zero-length chunk).
+    body_writer.end() catch {};
 }
 
 fn respondNotFound(gpa: std.mem.Allocator, request: *http.Server.Request) !void {

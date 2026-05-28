@@ -25,6 +25,7 @@ pub const Route = enum {
     projects_prompts_get,
     jobs_cancel,
     jobs_logs,
+    jobs_stream,
     not_found,
     cors_preflight,
 };
@@ -59,6 +60,9 @@ pub fn match(method: Method, path: []const u8) Match {
                 }
                 if (method == .GET and std.mem.eql(u8, action, "logs")) {
                     return .{ .route = .jobs_logs, .id = job_id };
+                }
+                if (method == .GET and std.mem.eql(u8, action, "stream")) {
+                    return .{ .route = .jobs_stream, .id = job_id };
                 }
             }
         }
@@ -234,6 +238,13 @@ test "match POST /api/v1/jobs/:id/cancel" {
 test "match GET /api/v1/jobs/:id/logs" {
     const m = match(.GET, "/api/v1/jobs/job_abc123/logs");
     try testing.expectEqual(Route.jobs_logs, m.route);
+    try testing.expectEqualStrings("job_abc123", m.id.?);
+    try testing.expect(m.child == null);
+}
+
+test "match GET /api/v1/jobs/:id/stream" {
+    const m = match(.GET, "/api/v1/jobs/job_abc123/stream");
+    try testing.expectEqual(Route.jobs_stream, m.route);
     try testing.expectEqualStrings("job_abc123", m.id.?);
     try testing.expect(m.child == null);
 }

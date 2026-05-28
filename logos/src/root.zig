@@ -30,3 +30,4 @@ pub const worker = @import("agents/worker.zig");
 pub const supervisor = @import("agents/supervisor.zig");
 pub const dispatcher = @import("agents/dispatcher.zig");
 pub const handlers_jobs = @import("api/handlers_jobs.zig");
+pub const sse = @import("api/sse.zig");
