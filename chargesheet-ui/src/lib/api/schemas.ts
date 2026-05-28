@@ -122,3 +122,62 @@ export const JobSchema = z.object({
 	results: z.unknown().nullable(),
 	error: z.string().nullable(),
 });
+
+// --- Stats ---
+
+export const KindTotalsSchema = z.object({
+	kind: z.string(),
+	runs: z.number().int().nonnegative(),
+	in_tokens: z.number().int().nonnegative(),
+	out_tokens: z.number().int().nonnegative(),
+	cost_usd: z.number().nonnegative(),
+	avg_latency_s: z.number().nonnegative(),
+});
+
+export const ModelTotalsSchema = z.object({
+	model: z.string(),
+	runs: z.number().int().nonnegative(),
+	in_tokens: z.number().int().nonnegative(),
+	out_tokens: z.number().int().nonnegative(),
+	cost_usd: z.number().nonnegative(),
+});
+
+export const ProjectTotalsSchema = z.object({
+	project_id: z.string(),
+	ocr_cost_usd: z.number().nonnegative(),
+	prompt_cost_usd: z.number().nonnegative(),
+	total_in_tokens: z.number().int().nonnegative(),
+	total_out_tokens: z.number().int().nonnegative(),
+	ocr_runs: z.number().int().nonnegative(),
+	prompt_runs: z.number().int().nonnegative(),
+});
+
+export const OverviewSchema = z.object({
+	lifetime: z.object({
+		ocr: KindTotalsSchema,
+		prompt: KindTotalsSchema,
+	}),
+	per_model: z.array(ModelTotalsSchema),
+	top_projects: z.array(ProjectTotalsSchema),
+});
+
+export const DayBucketSchema = z.object({
+	day: z.string(),
+	in_tokens: z.number().int().nonnegative(),
+	out_tokens: z.number().int().nonnegative(),
+	cost_usd: z.number().nonnegative(),
+});
+
+export const TimeseriesResponseSchema = z.array(DayBucketSchema);
+
+export const SlowJobSchema = z.object({
+	kind: z.enum(['extraction', 'prompt']),
+	project_id: z.string(),
+	subject: z.string(),
+	model: z.string(),
+	latency_s: z.number().nonnegative(),
+	total_tokens: z.number().int().nonnegative(),
+	created_at: z.string(),
+});
+
+export const SlowJobsResponseSchema = z.array(SlowJobSchema);

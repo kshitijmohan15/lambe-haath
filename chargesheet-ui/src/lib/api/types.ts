@@ -20,6 +20,12 @@ export type LogLevel = z.infer<typeof s.LogLevelSchema>;
 export type JobLogEntry = z.infer<typeof s.JobLogEntrySchema>;
 export type JobLogsResponse = z.infer<typeof s.JobLogsResponseSchema>;
 export type Job = z.infer<typeof s.JobSchema>;
+export type KindTotals = z.infer<typeof s.KindTotalsSchema>;
+export type ModelTotals = z.infer<typeof s.ModelTotalsSchema>;
+export type ProjectTotals = z.infer<typeof s.ProjectTotalsSchema>;
+export type Overview = z.infer<typeof s.OverviewSchema>;
+export type DayBucket = z.infer<typeof s.DayBucketSchema>;
+export type SlowJob = z.infer<typeof s.SlowJobSchema>;
 
 export interface LocalSlice {
 	id: string;
