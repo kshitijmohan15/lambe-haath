@@ -497,6 +497,8 @@ pub fn parseExtractionFields(gpa: Allocator, json_text: []const u8) !ExtractionF
 
     if (md_v != .string or mp_v != .string or mdl_v != .string) return error.InvalidExtractionResult;
     if (pages_v != .integer or pmf_v != .integer) return error.InvalidExtractionResult;
+    if (pages_v.integer < 1 or pages_v.integer > std.math.maxInt(u32)) return error.InvalidExtractionResult;
+    if (pmf_v.integer < 0 or pmf_v.integer > std.math.maxInt(u32)) return error.InvalidExtractionResult;
 
     const md  = try gpa.dupe(u8, md_v.string);
     errdefer gpa.free(md);
@@ -631,4 +633,28 @@ test "parseSliceFilenameFromPayload extracts slice_filename" {
     const sf = try parseSliceFilenameFromPayload(gpa, "{\"slice_filename\":\"annexure-i.pdf\"}");
     defer gpa.free(sf);
     try std.testing.expectEqualStrings("annexure-i.pdf", sf);
+}
+
+test "parseExtractionFields rejects out-of-range pages" {
+    const gpa = std.testing.allocator;
+    const json_text =
+        \\{"markdown_path":"/x.md","meta_path":"/x.json","model":"gemini-2.5-flash",
+        \\ "pages":-1,"page_markers_found":5,"input_tokens":100,"output_tokens":500,"latency_s":12.5}
+    ;
+    try std.testing.expectError(
+        error.InvalidExtractionResult,
+        parseExtractionFields(gpa, json_text),
+    );
+}
+
+test "parseExtractionFields rejects negative page_markers_found" {
+    const gpa = std.testing.allocator;
+    const json_text =
+        \\{"markdown_path":"/x.md","meta_path":"/x.json","model":"gemini-2.5-flash",
+        \\ "pages":5,"page_markers_found":-1,"input_tokens":100,"output_tokens":500,"latency_s":12.5}
+    ;
+    try std.testing.expectError(
+        error.InvalidExtractionResult,
+        parseExtractionFields(gpa, json_text),
+    );
 }
