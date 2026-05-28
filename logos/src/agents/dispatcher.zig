@@ -97,8 +97,10 @@ pub const Dispatcher = struct {
             self.maybeDispatch("ocr") catch {};
             self.maybeDispatch("prompt") catch {};
 
-            // 4. Sleep / wait for next event (50ms timeout).
-            _ = self.channel.recvTimeout(50);
+            // 4. Sleep / wait for next event (50ms timeout); handle it if one arrives.
+            if (self.channel.recvTimeout(50)) |env| {
+                self.handleEnvelope(env);
+            }
         }
     }
 
@@ -307,10 +309,10 @@ pub const Dispatcher = struct {
 
         // Clear all cancel requests, freeing their keys.
         var kit = self.cancel_requests.keyIterator();
-        var keys_to_free = std.ArrayList([]const u8).init(self.gpa);
-        defer keys_to_free.deinit();
+        var keys_to_free: std.ArrayList([]const u8) = .empty;
+        defer keys_to_free.deinit(self.gpa);
         while (kit.next()) |k| {
-            keys_to_free.append(k.*) catch {};
+            keys_to_free.append(self.gpa, k.*) catch {};
         }
         self.cancel_requests.clearRetainingCapacity();
         for (keys_to_free.items) |k| self.gpa.free(k);
