@@ -107,6 +107,9 @@ pub const Supervisor = struct {
                 _ = w.child.wait(self.io) catch {};
                 w.state = .dead;
 
+                // Free any in-flight job_id before destroying the worker.
+                if (w.current_job_id) |jid| self.gpa.free(jid);
+
                 // Remove from list and free.
                 _ = self.workers.orderedRemove(i);
                 self.gpa.destroy(w);
@@ -144,6 +147,7 @@ pub const Supervisor = struct {
 
         for (self.workers.items) |w| {
             w.close(self.gpa);
+            if (w.current_job_id) |jid| self.gpa.free(jid);
             self.gpa.destroy(w);
         }
         self.workers.clearRetainingCapacity();
