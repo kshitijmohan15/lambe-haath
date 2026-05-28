@@ -978,17 +978,27 @@ fn respondProjectsPromptsList(
     };
     defer prompt_outputs_mod.deinitList(list, gpa);
 
-    var buf: [64 * 1024]u8 = undefined;
+    var buf: [256 * 1024]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     try w.writeAll("[");
     for (list, 0..) |p, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"prompt_name\":");
+        try w.writeAll("{\"project_id\":");
+        try json.writeJsonString(&w, p.project_id);
+        try w.writeAll(",\"prompt_name\":");
         try json.writeJsonString(&w, p.prompt_name);
         try w.writeAll(",\"markdown_path\":");
         try json.writeJsonString(&w, p.markdown_path);
         try w.writeAll(",\"model\":");
         try json.writeJsonString(&w, p.model);
+        try w.writeAll(",\"input_tokens\":");
+        if (p.input_tokens) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.writeAll(",\"output_tokens\":");
+        if (p.output_tokens) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.writeAll(",\"input_cost_usd\":");
+        if (p.input_cost_usd) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
+        try w.writeAll(",\"output_cost_usd\":");
+        if (p.output_cost_usd) |v| try w.print("{d}", .{v}) else try w.writeAll("null");
         try w.print(",\"latency_s\":{d}", .{p.latency_s});
         try w.writeAll(",\"warnings\":");
         try w.writeAll(p.warnings_json);
