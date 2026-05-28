@@ -10,6 +10,8 @@ const jsonrpc = @import("jsonrpc.zig");
 const db_mod = @import("../db/db.zig");
 const jobs_mod = @import("../db/jobs.zig");
 const job_logs_mod = @import("../db/job_logs.zig");
+const extractions_mod = @import("../db/extractions.zig");
+const pricing = @import("pricing.zig");
 
 const Db = db_mod.Db;
 const EventChannel = event_channel_mod.EventChannel;
@@ -159,6 +161,15 @@ pub const Dispatcher = struct {
         switch (resp.body) {
             .result => |result_json| {
                 jobs_mod.markCompletedAt(self.db, job_id, result_json, now) catch {};
+                // If this was an OCR job, write an extractions row.
+                ocr_block: {
+                    const job = jobs_mod.getById(self.db, self.gpa, job_id) catch break :ocr_block;
+                    var j = job orelse break :ocr_block;
+                    defer j.deinit(self.gpa);
+                    if (j.type != .ocr) break :ocr_block;
+
+                    self.handleOcrSuccess(j.project_id, j.payload, result_json);
+                }
             },
             .err => |*err_obj| {
                 if (err_obj.code == CANCEL_CODE) {
@@ -399,7 +410,127 @@ pub const Dispatcher = struct {
         if (s.len <= max_len) return s;
         return s[0..max_len];
     }
+
+    /// Parse the OCR result JSON, build an extractions row, and upsert it.
+    /// Called while db_mu is held. Logs warnings on partial failure but never
+    /// propagates errors — the job is already marked completed by this point.
+    fn handleOcrSuccess(
+        self: *Dispatcher,
+        project_id: []const u8,
+        payload_json: []const u8,
+        result_json: []const u8,
+    ) void {
+        const ef = parseExtractionFields(self.gpa, result_json) catch |err| {
+            std.log.warn("ocr result didn't parse: {s}", .{@errorName(err)});
+            return;
+        };
+        defer {
+            self.gpa.free(ef.markdown_path);
+            self.gpa.free(ef.meta_path);
+            self.gpa.free(ef.model);
+        }
+
+        const slice_filename = parseSliceFilenameFromPayload(self.gpa, payload_json) catch |err| {
+            std.log.warn("ocr payload didn't parse: {s}", .{@errorName(err)});
+            return;
+        };
+        defer self.gpa.free(slice_filename);
+
+        const costs = pricing.cost(ef.model, ef.input_tokens orelse 0, ef.output_tokens orelse 0);
+
+        const now_e = db_mod.nowIso8601(self.gpa) catch {
+            std.log.warn("nowIso8601 failed for extractions row", .{});
+            return;
+        };
+        defer self.gpa.free(now_e);
+
+        extractions_mod.upsert(self.db, self.gpa, .{
+            .project_id = project_id,
+            .slice_filename = slice_filename,
+            .markdown_path = ef.markdown_path,
+            .meta_path = ef.meta_path,
+            .model = ef.model,
+            .pages = ef.pages,
+            .page_markers_found = ef.page_markers_found,
+            .input_tokens = ef.input_tokens,
+            .output_tokens = ef.output_tokens,
+            .input_cost_usd = if (costs) |c| c.input else null,
+            .output_cost_usd = if (costs) |c| c.output else null,
+            .latency_s = ef.latency_s,
+            .created_at = now_e,
+        }) catch |err| {
+            std.log.warn("extractions.upsert failed: {s}", .{@errorName(err)});
+        };
+    }
 };
+
+// ---------------------------------------------------------------------------
+// OCR result parsing helpers (pub so tests can call them directly)
+// ---------------------------------------------------------------------------
+
+pub const ExtractionFields = struct {
+    markdown_path: []const u8,
+    meta_path: []const u8,
+    model: []const u8,
+    pages: u32,
+    page_markers_found: u32,
+    input_tokens: ?i64,
+    output_tokens: ?i64,
+    latency_s: f64,
+};
+
+/// Parse the JSON object returned by the OCR agent into an ExtractionFields.
+/// Caller owns all string fields; free them individually or call
+/// gpa.free(ef.markdown_path), gpa.free(ef.meta_path), gpa.free(ef.model).
+pub fn parseExtractionFields(gpa: Allocator, json_text: []const u8) !ExtractionFields {
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, json_text, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidExtractionResult;
+    const obj = parsed.value.object;
+
+    const md_v   = obj.get("markdown_path")    orelse return error.InvalidExtractionResult;
+    const mp_v   = obj.get("meta_path")         orelse return error.InvalidExtractionResult;
+    const mdl_v  = obj.get("model")             orelse return error.InvalidExtractionResult;
+    const pages_v = obj.get("pages")            orelse return error.InvalidExtractionResult;
+    const pmf_v  = obj.get("page_markers_found") orelse return error.InvalidExtractionResult;
+    const lat_v  = obj.get("latency_s")         orelse return error.InvalidExtractionResult;
+
+    if (md_v != .string or mp_v != .string or mdl_v != .string) return error.InvalidExtractionResult;
+    if (pages_v != .integer or pmf_v != .integer) return error.InvalidExtractionResult;
+
+    const md  = try gpa.dupe(u8, md_v.string);
+    errdefer gpa.free(md);
+    const mp  = try gpa.dupe(u8, mp_v.string);
+    errdefer gpa.free(mp);
+    const mdl = try gpa.dupe(u8, mdl_v.string);
+    errdefer gpa.free(mdl);
+
+    return .{
+        .markdown_path     = md,
+        .meta_path         = mp,
+        .model             = mdl,
+        .pages             = @intCast(pages_v.integer),
+        .page_markers_found = @intCast(pmf_v.integer),
+        .input_tokens  = if (obj.get("input_tokens"))  |v| (if (v == .integer) v.integer else null) else null,
+        .output_tokens = if (obj.get("output_tokens")) |v| (if (v == .integer) v.integer else null) else null,
+        .latency_s = switch (lat_v) {
+            .float   => |f| f,
+            .integer => |i| @floatFromInt(i),
+            else => return error.InvalidExtractionResult,
+        },
+    };
+}
+
+/// Parse `{"slice_filename":"..."}` from the job payload and return an
+/// owned copy of the filename string. Caller must free the returned slice.
+pub fn parseSliceFilenameFromPayload(gpa: Allocator, payload_json: []const u8) ![]const u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidPayload;
+    const sf_v = parsed.value.object.get("slice_filename") orelse return error.InvalidPayload;
+    if (sf_v != .string) return error.InvalidPayload;
+    return try gpa.dupe(u8, sf_v.string);
+}
 
 /// Parse a JSON object string and extract a top-level float field by name.
 /// Returns null on any parse/lookup failure.
@@ -466,4 +597,38 @@ test "extractFloatField parses progress from notification params" {
     // Malformed JSON.
     const p4 = extractFloatField("not json", "progress");
     try std.testing.expect(p4 == null);
+}
+
+test "parseExtractionFields parses a real OCR result payload" {
+    const gpa = std.testing.allocator;
+    const json_text =
+        \\{"markdown_path":"/x.md","meta_path":"/x.json","model":"gemini-2.5-flash",
+        \\ "pages":5,"page_markers_found":5,"input_tokens":100,"output_tokens":500,"latency_s":12.5}
+    ;
+    const ef = try parseExtractionFields(gpa, json_text);
+    defer {
+        gpa.free(ef.markdown_path);
+        gpa.free(ef.meta_path);
+        gpa.free(ef.model);
+    }
+    try std.testing.expectEqualStrings("/x.md", ef.markdown_path);
+    try std.testing.expectEqualStrings("gemini-2.5-flash", ef.model);
+    try std.testing.expectEqual(@as(u32, 5), ef.pages);
+    try std.testing.expectEqual(@as(?i64, 100), ef.input_tokens);
+    try std.testing.expectApproxEqAbs(@as(f64, 12.5), ef.latency_s, 0.001);
+}
+
+test "parseExtractionFields rejects missing required field" {
+    const gpa = std.testing.allocator;
+    try std.testing.expectError(
+        error.InvalidExtractionResult,
+        parseExtractionFields(gpa, "{\"markdown_path\":\"/x.md\"}"),
+    );
+}
+
+test "parseSliceFilenameFromPayload extracts slice_filename" {
+    const gpa = std.testing.allocator;
+    const sf = try parseSliceFilenameFromPayload(gpa, "{\"slice_filename\":\"annexure-i.pdf\"}");
+    defer gpa.free(sf);
+    try std.testing.expectEqualStrings("annexure-i.pdf", sf);
 }
