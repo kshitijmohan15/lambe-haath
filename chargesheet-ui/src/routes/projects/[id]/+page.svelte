@@ -6,6 +6,7 @@
 	import Tabs from '$lib/components/Tabs.svelte';
 	import ExtractionsPanel from '$lib/components/ExtractionsPanel.svelte';
 	import PromptsPanel from '$lib/components/PromptsPanel.svelte';
+	import StatsPanel from '$lib/components/StatsPanel.svelte';
 	import { pdfStore } from '$lib/stores/pdf.svelte';
 	import { slicesStore } from '$lib/stores/slices.svelte';
 	import { toastsStore } from '$lib/stores/toasts.svelte';
@@ -17,7 +18,7 @@
 
 	let submitting = $state(false);
 	let producedReloadKey = $state(0);
-	let activeTab = $state<'slice' | 'extractions' | 'prompts'>('slice');
+	let activeTab = $state<'slice' | 'extractions' | 'prompts' | 'stats'>('slice');
 
 	async function trySubmit() {
 		if (submitting || pdfStore.pageCount === null) return;
@@ -86,6 +87,7 @@
 			{ key: 'slice', label: 'Slice' },
 			{ key: 'extractions', label: 'Extractions' },
 			{ key: 'prompts', label: 'Prompts' },
+			{ key: 'stats', label: 'Stats' },
 		]}
 		bind:active={activeTab}
 	/>
@@ -113,6 +115,8 @@
 			<ExtractionsPanel projectId={project.id} />
 		{:else if activeTab === 'prompts'}
 			<PromptsPanel projectId={project.id} />
+		{:else if activeTab === 'stats'}
+			<StatsPanel projectId={project.id} />
 		{/if}
 	</div>
 </div>
