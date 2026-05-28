@@ -18,3 +18,4 @@ test "basic add functionality" {
 }
 
 pub const extractions = @import("db/extractions.zig");
+pub const prompt_outputs = @import("db/prompt_outputs.zig");

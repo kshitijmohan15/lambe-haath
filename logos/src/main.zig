@@ -139,6 +139,7 @@ test {
     _ = @import("db/slices.zig");
     _ = @import("db/jobs.zig");
     _ = @import("db/extractions.zig");
+    _ = @import("db/prompt_outputs.zig");
     _ = @import("api/json.zig");
     _ = @import("api/router.zig");
     _ = @import("api/multipart.zig");
