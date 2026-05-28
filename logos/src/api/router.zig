@@ -19,6 +19,10 @@ pub const Route = enum {
     projects_slices_delete,
     projects_extractions_list,
     projects_extractions_get,
+    projects_jobs_prompt,
+    projects_jobs_prompt_all,
+    projects_prompts_list,
+    projects_prompts_get,
     not_found,
     cors_preflight,
 };
@@ -70,6 +74,12 @@ pub fn match(method: Method, path: []const u8) Match {
         if (method == .POST and std.mem.eql(u8, job_part, "ocr")) {
             return .{ .route = .projects_jobs_ocr, .id = id };
         }
+        if (method == .POST and std.mem.eql(u8, job_part, "prompt/all")) {
+            return .{ .route = .projects_jobs_prompt_all, .id = id };
+        }
+        if (method == .POST and std.mem.eql(u8, job_part, "prompt")) {
+            return .{ .route = .projects_jobs_prompt, .id = id };
+        }
         // /api/v1/projects/:id/jobs/:job_id
         if (method == .GET and std.mem.indexOfScalar(u8, job_part, '/') == null and job_part.len > 0) {
             return .{ .route = .projects_jobs_get, .id = id, .child = job_part };
@@ -96,6 +106,17 @@ pub fn match(method: Method, path: []const u8) Match {
         const filename = after_id["extractions/".len..];
         if (filename.len > 0 and std.mem.indexOfScalar(u8, filename, '/') == null) {
             if (method == .GET) return .{ .route = .projects_extractions_get, .id = id, .child = filename };
+        }
+    }
+
+    // /api/v1/projects/:id/prompts/...
+    if (std.mem.eql(u8, after_id, "prompts") and method == .GET) {
+        return .{ .route = .projects_prompts_list, .id = id };
+    }
+    if (std.mem.startsWith(u8, after_id, "prompts/")) {
+        const prompt_name = after_id["prompts/".len..];
+        if (prompt_name.len > 0 and std.mem.indexOfScalar(u8, prompt_name, '/') == null) {
+            if (method == .GET) return .{ .route = .projects_prompts_get, .id = id, .child = prompt_name };
         }
     }
 

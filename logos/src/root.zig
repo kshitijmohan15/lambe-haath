@@ -19,6 +19,7 @@ test "basic add functionality" {
 
 pub const extractions = @import("db/extractions.zig");
 pub const handlers_ocr = @import("api/handlers_ocr.zig");
+pub const handlers_prompts = @import("api/handlers_prompts.zig");
 pub const prompt_outputs = @import("db/prompt_outputs.zig");
 pub const job_logs = @import("db/job_logs.zig");
 pub const pricing = @import("agents/pricing.zig");
