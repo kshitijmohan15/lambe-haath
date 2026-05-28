@@ -17,8 +17,10 @@ const json = @import("json.zig");
 const Db = @import("../db/db.zig").Db;
 const router = @import("router.zig");
 const handlers = @import("handlers.zig");
+const handlers_ocr = @import("handlers_ocr.zig");
 const static = @import("static.zig");
 const slices_mod = @import("../db/slices.zig");
+const extractions_mod = @import("../db/extractions.zig");
 
 const cors_origin = "http://localhost:5173";
 
@@ -139,6 +141,10 @@ fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Serv
         .projects_slices_list => respondProjectsSlicesList(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .projects_slices_get => respondProjectsSlicesGet(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
         .projects_slices_delete => respondProjectsSlicesDelete(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
+        .projects_jobs_ocr => respondProjectsJobsOcr(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .projects_jobs_ocr_all => respondProjectsJobsOcrAll(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .projects_extractions_list => respondProjectsExtractionsList(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
+        .projects_extractions_get => respondProjectsExtractionsGet(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
         .not_found => {
             // Strip any `?query` before the on-disk lookup: SvelteKit/Vite assets
             // carry cache-busting params (e.g. app.js?v=2) that would otherwise
@@ -675,6 +681,169 @@ fn respondProjectsSlicesDelete(
         return respondError(request, status, code, "Slice not deleted");
     };
     try request.respond("", .{ .status = .no_content, .extra_headers = &cors_headers });
+}
+
+fn respondProjectsJobsOcr(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+) !void {
+    var read_buf: [4096]u8 = undefined;
+    const body_reader = request.readerExpectNone(&read_buf);
+    const body = body_reader.allocRemaining(gpa, .limited(1 * 1024 * 1024)) catch {
+        return respondError(request, .bad_request, "INVALID_REQUEST", "Body too large or unreadable");
+    };
+    defer gpa.free(body);
+
+    var result = handlers_ocr.handleEnqueueOcr(io, gpa, db, project_id, body) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.InvalidRequest => .bad_request,
+            error.ProjectNotFound, error.SliceNotFound => .not_found,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.InvalidRequest => "INVALID_REQUEST",
+            error.ProjectNotFound => "NOT_FOUND",
+            error.SliceNotFound => "NOT_FOUND",
+            else => "INTERNAL_ERROR",
+        };
+        const message: []const u8 = switch (err) {
+            error.InvalidRequest => "Invalid request body",
+            error.ProjectNotFound => "Project not found",
+            error.SliceNotFound => "Slice not found",
+            else => "Internal error",
+        };
+        return respondError(request, status, code, message);
+    };
+    defer result.deinit(gpa);
+
+    var resp_buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&resp_buf);
+    try json.writeJobCreated(&w, result.job_id);
+    const resp_body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(resp_body, .{ .status = .created, .extra_headers = &headers });
+}
+
+fn respondProjectsJobsOcrAll(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+) !void {
+    var result = handlers_ocr.handleEnqueueOcrAll(io, gpa, db, project_id) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.ProjectNotFound => .not_found,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.ProjectNotFound => "NOT_FOUND",
+            else => "INTERNAL_ERROR",
+        };
+        const message: []const u8 = switch (err) {
+            error.ProjectNotFound => "Project not found",
+            else => "Internal error",
+        };
+        return respondError(request, status, code, message);
+    };
+    defer result.deinit(gpa);
+
+    // Build {"job_ids":["id1","id2",...]}
+    var buf: [16 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.writeAll("{\"job_ids\":[");
+    for (result.job_ids, 0..) |jid, i| {
+        if (i > 0) try w.writeAll(",");
+        try json.writeJsonString(&w, jid);
+    }
+    try w.writeAll("]}");
+    const resp_body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(resp_body, .{ .status = .created, .extra_headers = &headers });
+}
+
+fn respondProjectsExtractionsList(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+) !void {
+    const list = handlers_ocr.handleListExtractions(gpa, db, project_id) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.ProjectNotFound => .not_found,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.ProjectNotFound => "NOT_FOUND",
+            else => "INTERNAL_ERROR",
+        };
+        return respondError(request, status, code, "Extractions unavailable");
+    };
+    defer extractions_mod.deinitList(list, gpa);
+
+    var buf: [64 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.writeAll("[");
+    for (list, 0..) |e, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"slice_filename\":");
+        try json.writeJsonString(&w, e.slice_filename);
+        try w.writeAll(",\"markdown_path\":");
+        try json.writeJsonString(&w, e.markdown_path);
+        try w.print(",\"pages\":{d},\"page_markers_found\":{d}", .{ e.pages, e.page_markers_found });
+        try w.writeAll(",\"model\":");
+        try json.writeJsonString(&w, e.model);
+        try w.writeAll(",\"created_at\":");
+        try json.writeJsonString(&w, e.created_at);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+    const resp_body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(resp_body, .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondProjectsExtractionsGet(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+    slice_filename: []const u8,
+) !void {
+    const result = handlers_ocr.handleGetExtractionMarkdown(io, gpa, db, project_id, slice_filename) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.ProjectNotFound, error.ExtractionNotFound => .not_found,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.ProjectNotFound, error.ExtractionNotFound => "NOT_FOUND",
+            else => "INTERNAL_ERROR",
+        };
+        return respondError(request, status, code, "Extraction not available");
+    };
+    defer result.deinit(gpa);
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "text/plain; charset=utf-8" },
+    } ++ cors_headers;
+
+    try request.respond(result.markdown_bytes, .{ .status = .ok, .extra_headers = &headers });
 }
 
 fn respondNotFound(gpa: std.mem.Allocator, request: *http.Server.Request) !void {

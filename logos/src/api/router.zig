@@ -12,9 +12,13 @@ pub const Route = enum {
     projects_chargesheet,
     projects_jobs_slice,
     projects_jobs_get,
+    projects_jobs_ocr,
+    projects_jobs_ocr_all,
     projects_slices_list,
     projects_slices_get,
     projects_slices_delete,
+    projects_extractions_list,
+    projects_extractions_get,
     not_found,
     cors_preflight,
 };
@@ -60,6 +64,12 @@ pub fn match(method: Method, path: []const u8) Match {
         if (method == .POST and std.mem.eql(u8, job_part, "slice")) {
             return .{ .route = .projects_jobs_slice, .id = id };
         }
+        if (method == .POST and std.mem.eql(u8, job_part, "ocr/all")) {
+            return .{ .route = .projects_jobs_ocr_all, .id = id };
+        }
+        if (method == .POST and std.mem.eql(u8, job_part, "ocr")) {
+            return .{ .route = .projects_jobs_ocr, .id = id };
+        }
         // /api/v1/projects/:id/jobs/:job_id
         if (method == .GET and std.mem.indexOfScalar(u8, job_part, '/') == null and job_part.len > 0) {
             return .{ .route = .projects_jobs_get, .id = id, .child = job_part };
@@ -75,6 +85,17 @@ pub fn match(method: Method, path: []const u8) Match {
         if (filename.len > 0 and std.mem.indexOfScalar(u8, filename, '/') == null) {
             if (method == .GET) return .{ .route = .projects_slices_get, .id = id, .child = filename };
             if (method == .DELETE) return .{ .route = .projects_slices_delete, .id = id, .child = filename };
+        }
+    }
+
+    // /api/v1/projects/:id/extractions/...
+    if (std.mem.eql(u8, after_id, "extractions") and method == .GET) {
+        return .{ .route = .projects_extractions_list, .id = id };
+    }
+    if (std.mem.startsWith(u8, after_id, "extractions/")) {
+        const filename = after_id["extractions/".len..];
+        if (filename.len > 0 and std.mem.indexOfScalar(u8, filename, '/') == null) {
+            if (method == .GET) return .{ .route = .projects_extractions_get, .id = id, .child = filename };
         }
     }
 

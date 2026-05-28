@@ -153,6 +153,7 @@ test {
     _ = @import("api/router.zig");
     _ = @import("api/multipart.zig");
     _ = @import("api/static.zig");
+    _ = @import("api/handlers_ocr.zig");
     _ = @import("ids.zig");
     _ = @import("storage/project_dir.zig");
 }
