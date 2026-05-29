@@ -72,10 +72,14 @@
 	}
 </script>
 
-<form class="mx-auto max-w-xl space-y-6" onsubmit={onSubmit}>
-	<div class="space-y-1">
-		<label for="proj-name" class="block text-sm font-medium text-gray-700">
-			Project name <span class="text-red-500">*</span>
+<form class="space-y-6" onsubmit={onSubmit}>
+	<!-- Matter name -->
+	<div>
+		<label
+			for="proj-name"
+			class="mb-2 block font-sans text-[10px] font-semibold uppercase tracking-[0.6px] text-ink-3"
+		>
+			Matter name <span class="text-err">*</span>
 		</label>
 		<input
 			id="proj-name"
@@ -84,14 +88,18 @@
 			maxlength={200}
 			bind:value={name}
 			placeholder="e.g. Case 2024/CR/123 — Suresh K."
-			class="block w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+			class="w-full rounded-[9px] border border-line bg-card px-3 py-[10px] font-sans text-[13px] text-ink placeholder:text-ink-3 focus:border-navy focus:outline-none focus:ring-2 focus:ring-navy/20 disabled:cursor-not-allowed disabled:bg-panel disabled:text-ink-3"
 			disabled={submitting}
 		/>
 	</div>
 
-	<div class="space-y-1">
-		<label for="proj-desc" class="block text-sm font-medium text-gray-700">
-			Description <span class="text-gray-400">(optional)</span>
+	<!-- Description -->
+	<div>
+		<label
+			for="proj-desc"
+			class="mb-2 block font-sans text-[10px] font-semibold uppercase tracking-[0.6px] text-ink-3"
+		>
+			Description <span class="font-normal normal-case tracking-normal text-ink-3">(optional)</span>
 		</label>
 		<textarea
 			id="proj-desc"
@@ -99,31 +107,31 @@
 			maxlength={2000}
 			bind:value={description}
 			placeholder="Notes for your own reference."
-			class="block w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+			class="w-full rounded-[9px] border border-line bg-card px-3 py-[10px] font-sans text-[13px] text-ink placeholder:text-ink-3 focus:border-navy focus:outline-none focus:ring-2 focus:ring-navy/20 disabled:cursor-not-allowed disabled:bg-panel disabled:text-ink-3"
 			disabled={submitting}
 		></textarea>
 	</div>
 
-	<div class="space-y-1">
-		<span class="block text-sm font-medium text-gray-700">
-			Chargesheet PDF <span class="text-red-500">*</span>
+	<!-- Chargesheet PDF -->
+	<div>
+		<span class="mb-2 block font-sans text-[10px] font-semibold uppercase tracking-[0.6px] text-ink-3">
+			Chargesheet PDF <span class="text-err">*</span>
 		</span>
 		<label
 			for="proj-file"
-			class="flex cursor-pointer flex-col items-center justify-center gap-2 rounded border-2 border-dashed px-6 py-10 text-center text-sm transition-colors {dragging
-				? 'border-blue-500 bg-blue-50 text-blue-700'
-				: 'border-gray-300 bg-gray-50 text-gray-600 hover:bg-gray-100'}"
+			class="block cursor-pointer rounded-[11px] border border-dashed px-4 py-8 text-center transition-colors {dragging
+				? 'border-navy bg-navy-soft/30'
+				: 'border-line bg-paper hover:border-navy hover:bg-navy-soft/30'}"
 			ondragover={onDragOver}
 			ondragleave={onDragLeave}
 			ondrop={onDrop}
 		>
 			{#if file}
-				<div class="font-medium text-gray-900">{file.name}</div>
-				<div class="text-xs text-gray-500">{formatBytes(file.size)}</div>
-				<div class="text-xs text-blue-600 underline">Click or drop another to replace</div>
+				<div class="font-serif text-[14px] font-medium text-ink">{file.name}</div>
+				<div class="mt-1 font-mono text-[11px] text-ink-3">{formatBytes(file.size)} · Click or drop another to replace</div>
 			{:else}
-				<div class="font-medium">Drop a PDF here, or click to browse</div>
-				<div class="text-xs">Only .pdf files are accepted</div>
+				<div class="font-serif text-[14px] font-medium text-ink">Drop a PDF here or click to choose</div>
+				<div class="mt-1 font-mono text-[11px] text-ink-3">Only .pdf files are accepted</div>
 			{/if}
 			<input
 				id="proj-file"
@@ -135,14 +143,15 @@
 			/>
 		</label>
 		{#if fileError}
-			<p class="text-sm text-red-600">{fileError}</p>
+			<p class="mt-1.5 font-sans text-[12px] text-err">{fileError}</p>
 		{/if}
 	</div>
 
-	<div class="flex items-center justify-end gap-2">
+	<!-- Actions -->
+	<div class="mt-6 flex justify-end gap-3 border-t border-line pt-6">
 		<Button variant="secondary" onclick={onCancel} disabled={submitting}>Cancel</Button>
 		<Button type="submit" variant="primary" disabled={!canSubmit}>
-			{submitting ? 'Creating…' : 'Create project'}
+			{submitting ? 'Creating…' : 'Create matter →'}
 		</Button>
 	</div>
 </form>
