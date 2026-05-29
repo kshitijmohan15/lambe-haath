@@ -151,9 +151,10 @@ pub fn streamJob(
         }
 
         // Release the mutex while sleeping so other requests aren't blocked.
+        // io.sleep is cross-platform; the prior std.c.nanosleep version did
+        // not compile for x86_64-windows-gnu.
         db_mu.unlock(io);
-        const ts_spec = std.c.timespec{ .sec = 0, .nsec = @as(c_long, 500 * std.time.ns_per_ms) };
-        _ = std.c.nanosleep(&ts_spec, null);
+        io.sleep(.fromMilliseconds(500), .awake) catch {};
         db_mu.lockUncancelable(io);
     }
 

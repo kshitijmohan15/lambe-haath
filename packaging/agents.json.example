@@ -1,0 +1,18 @@
+{
+  "agents": [
+    {
+      "kind": "ocr",
+      "command": "python3",
+      "args": ["-m", "agents.ocr_agent"],
+      "max_workers": 2,
+      "model": "gemini-2.5-flash"
+    },
+    {
+      "kind": "prompt",
+      "command": "python3",
+      "args": ["-m", "agents.prompt_agent"],
+      "max_workers": 5,
+      "model": "gemini-3.5-flash"
+    }
+  ]
+}

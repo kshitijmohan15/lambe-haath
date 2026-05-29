@@ -448,10 +448,16 @@ pub fn handleExportPrompts(
 
     // 6. Spawn `python3 -m agents.exporter --output <temp_path>` from agents_dir.
     const argv = [_][]const u8{ "python3", "-m", "agents.exporter", "--output", temp_path };
+    // Same comptime split as worker.zig — Windows uses GlobalBlock (no slice),
+    // POSIX uses PosixBlock built from std.c.environ.
     var env_map = blk: {
-        const c_environ: [*:null]?[*:0]const u8 = @ptrCast(std.c.environ);
-        const env_slice: [:null]const ?[*:0]const u8 = std.mem.span(c_environ);
-        const environ: std.process.Environ = .{ .block = .{ .slice = env_slice } };
+        const environ: std.process.Environ = if (@import("builtin").os.tag == .windows)
+            .{ .block = .global }
+        else env_blk: {
+            const c_environ: [*:null]?[*:0]const u8 = @ptrCast(std.c.environ);
+            const env_slice: [:null]const ?[*:0]const u8 = std.mem.span(c_environ);
+            break :env_blk .{ .block = .{ .slice = env_slice } };
+        };
         break :blk std.process.Environ.createMap(environ, gpa) catch return error.OutOfMemory;
     };
     defer env_map.deinit();

@@ -24,6 +24,7 @@ esac
 
 cp -R "$ui_dir/." "$stage/ui/"
 sed "s/@VERSION@/${version}/g" packaging/README.md > "$stage/README.md"
+cp packaging/agents.json.example "$stage/agents.json.example"
 if [ -f LICENSE ]; then cp LICENSE "$stage/LICENSE"; fi
 
 case "$platform" in

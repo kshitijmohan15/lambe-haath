@@ -15,7 +15,7 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       is_release: ${{ steps.v.outputs.is_release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: v
         shell: bash
         run: |
@@ -32,7 +32,7 @@ jobs:
   ui:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
       - working-directory: chargesheet-ui
@@ -58,7 +58,7 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-windows-gnu, platform: windows-x64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: mlugg/setup-zig@v2
         with: { version: "0.16.0" }
       - name: Cache MuPDF/zig build
@@ -107,7 +107,7 @@ jobs:
           - { os: windows-latest, platform: windows-x64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           name: bundle-${{ matrix.platform }}
@@ -162,7 +162,7 @@ jobs:
         os: [macos-14, ubuntu-latest, windows-latest]  # no Intel-mac runner available
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install + verify (unix)
         if: runner.os != 'Windows'
         shell: bash
