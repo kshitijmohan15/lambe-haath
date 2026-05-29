@@ -82,9 +82,14 @@ export function buildPromptsExportUrl(
 	format: ExportFormat,
 	names?: readonly KnownPromptName[]
 ): string {
-	const params = new URLSearchParams({ format });
-	if (names && names.length > 0) params.set('names', names.join(','));
-	return `/api/v1/projects/${encodeURIComponent(projectId)}/prompts/export?${params.toString()}`;
+	// Build the query string by hand: prompt names are `[a-z_]+` so they're
+	// URL-safe, and we explicitly want the commas LITERAL so the daemon's
+	// query parser (which does not URL-decode values) can split on them.
+	// URLSearchParams would percent-encode commas, which currently breaks the
+	// server-side tokenizer.
+	let qs = `format=${format}`;
+	if (names && names.length > 0) qs += `&names=${names.join(',')}`;
+	return `/api/v1/projects/${encodeURIComponent(projectId)}/prompts/export?${qs}`;
 }
 
 /**
