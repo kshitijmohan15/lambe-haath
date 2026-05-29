@@ -15,12 +15,23 @@
 	let confirmOpen = $state(false);
 	let deleting = $state(false);
 
-	// completionPercent: project schema has no slice_count / extraction_count fields,
-	// so we default to 0 for V1. Step 6 can wire real counts once the API exposes them.
-	const completionPercent = 0;
+	const stages: Record<string, string> = {
+		slice: 'Slice',
+		extract: 'Extract',
+		analyze: 'Analyze',
+		review: 'Review'
+	};
 
-	// stage: no stage data on project list schema — default to "Slice" for V1.
-	const stage = 'Slice';
+	const stage = $derived(stages[project.current_stage] ?? 'Slice');
+
+	// Completion across the whole pipeline: each of (slice exists, extractions, prompts) contributes 1/3.
+	const completionPercent = $derived.by(() => {
+		const sliceFrac = project.slice_count > 0 ? 1 : 0;
+		const extractFrac =
+			project.slice_count > 0 ? Math.min(1, project.extraction_count / project.slice_count) : 0;
+		const promptFrac = Math.min(1, project.prompt_count / 5);
+		return (sliceFrac + extractFrac + promptFrac) / 3;
+	});
 
 	// relativeUpdated: use last_opened_at (the most recently-touched timestamp available)
 	const relativeUpdated = $derived(formatRelative(project.last_opened_at));
@@ -76,7 +87,7 @@
 	<!-- Footer: page count + stage/updated pill -->
 	<div class="flex items-center justify-between gap-3">
 		<div class="flex items-center gap-3 font-mono text-[11px] font-medium text-ink-3">
-			<span>{pageCount}p</span>
+			<span>{pageCount}p</span> · <span>{project.slice_count} slices</span>
 		</div>
 		<span
 			class="whitespace-nowrap rounded-full bg-navy-soft px-2.5 py-1 font-sans text-[11px] font-semibold text-navy"

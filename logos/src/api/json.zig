@@ -8,7 +8,8 @@
 //! arguments.
 
 const std = @import("std");
-const Project = @import("../db/projects.zig").Project;
+const projects_db = @import("../db/projects.zig");
+const Project = projects_db.Project;
 
 /// Write `{"status":"ok","version":"<version>"}` to `w`.
 pub fn writeHealth(w: *std.Io.Writer, version: []const u8) !void {
@@ -74,7 +75,8 @@ pub fn writeJsonString(w: *std.Io.Writer, s: []const u8) !void {
 
 /// Write a Project as JSON matching the UI's ProjectSchema:
 ///   id, name, description (nullable), created_at, last_opened_at,
-///   chargesheet: { filename, page_count, size_bytes }
+///   chargesheet: { filename, page_count, size_bytes },
+///   slice_count, extraction_count, prompt_count, current_stage
 pub fn writeProject(w: *std.Io.Writer, project: Project) !void {
     try w.writeAll("{\"id\":");
     try writeJsonString(w, project.id);
@@ -96,7 +98,14 @@ pub fn writeProject(w: *std.Io.Writer, project: Project) !void {
         project.chargesheet_page_count,
         project.chargesheet_size_bytes,
     });
-    try w.writeAll("}}");
+    try w.print("}},\"slice_count\":{d},\"extraction_count\":{d},\"prompt_count\":{d}", .{
+        project.slice_count,
+        project.extraction_count,
+        project.prompt_count,
+    });
+    try w.writeAll(",\"current_stage\":");
+    try writeJsonString(w, projects_db.currentStage(project));
+    try w.writeAll("}");
 }
 
 test "writeProject matches UI schema" {
@@ -111,10 +120,13 @@ test "writeProject matches UI schema" {
         .chargesheet_filename = "case42.pdf",
         .chargesheet_page_count = 12,
         .chargesheet_size_bytes = 4096,
+        .slice_count = 0,
+        .extraction_count = 0,
+        .prompt_count = 0,
     };
     try writeProject(&w, p);
     try std.testing.expectEqualStrings(
-        \\{"id":"proj_abc","name":"Case 42","description":"Mock","created_at":"2026-05-25T10:00:00Z","last_opened_at":"2026-05-25T10:00:00Z","chargesheet":{"filename":"case42.pdf","page_count":12,"size_bytes":4096}}
+        \\{"id":"proj_abc","name":"Case 42","description":"Mock","created_at":"2026-05-25T10:00:00Z","last_opened_at":"2026-05-25T10:00:00Z","chargesheet":{"filename":"case42.pdf","page_count":12,"size_bytes":4096},"slice_count":0,"extraction_count":0,"prompt_count":0,"current_stage":"slice"}
     , w.buffered());
 }
 
@@ -125,9 +137,11 @@ test "writeProject with null description" {
         .id = "proj_x", .name = "X", .description = null,
         .created_at = "t", .last_opened_at = "t",
         .chargesheet_filename = "x.pdf", .chargesheet_page_count = 1, .chargesheet_size_bytes = 0,
+        .slice_count = 0, .extraction_count = 0, .prompt_count = 0,
     };
     try writeProject(&w, p);
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "\"description\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "\"current_stage\":\"slice\"") != null);
 }
 
 test "writeJsonString escapes quotes and backslashes" {

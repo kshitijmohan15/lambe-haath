@@ -12,7 +12,11 @@ export const ProjectSchema = z.object({
 	description: z.string().nullable(),
 	created_at: z.string(),
 	last_opened_at: z.string(),
-	chargesheet: ChargesheetMetadataSchema
+	chargesheet: ChargesheetMetadataSchema,
+	slice_count: z.number().int().nonnegative(),
+	extraction_count: z.number().int().nonnegative(),
+	prompt_count: z.number().int().nonnegative(),
+	current_stage: z.enum(['slice', 'extract', 'analyze', 'review'])
 });
 
 export const ProjectListSchema = z.array(ProjectSchema);
