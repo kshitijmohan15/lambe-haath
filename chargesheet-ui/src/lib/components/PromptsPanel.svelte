@@ -11,6 +11,7 @@
 	import JobStatusBadge from './JobStatusBadge.svelte';
 	import ProgressBar from './ProgressBar.svelte';
 	import MarkdownViewer from './MarkdownViewer.svelte';
+	import EmptyState from './EmptyState.svelte';
 
 	let { projectId }: { projectId: string } = $props();
 
@@ -20,6 +21,14 @@
 		time_chart:           'Time chart & flow chart',
 		evidence_audit:       'Evidence audit (RUDs + witnesses)',
 		objection_brief:      'Objection brief (compact)',
+	};
+
+	const PROMPT_DESCRIPTIONS: Record<KnownPromptName, string> = {
+		charge_memo_analysis: 'Analyses charges framed, counts alleged, and supporting sections.',
+		imputation_scrutiny:  'Checks if any new charge is imputed beyond the original FIR.',
+		time_chart:           'Constructs a chronological flow of events from the chargesheet.',
+		evidence_audit:       'Audits RUDs cited, witnesses listed, and gaps in the record.',
+		objection_brief:      'Drafts a compact objection brief for discharge arguments.',
 	};
 
 	let viewerOpen = $state<KnownPromptName | null>(null);
@@ -129,91 +138,93 @@
 	}
 </script>
 
-<div class="flex h-full flex-col">
-	<div class="flex items-center justify-between border-b border-gray-200 px-6 py-3">
-		<div>
-			<h2 class="text-sm font-semibold text-gray-900">Defence Prompts</h2>
-			<p class="text-xs text-gray-500">
-				{promptOutputsStore.rows.length} of 5 prompts complete
-			</p>
-		</div>
-		<div class="flex gap-2">
-			<Button variant="secondary" size="sm" onclick={() => void reload()}>Refresh</Button>
-			<Button variant="primary" size="sm" onclick={() => void triggerAll()}>Run all</Button>
-		</div>
-	</div>
+<!-- Two-column grid: 0.92fr left (prompt list) / 1.18fr right (output viewer) -->
+<div class="grid h-full overflow-hidden" style="grid-template-columns: 0.92fr 1.18fr; gap: 0;">
 
-	<div class="overflow-y-auto">
-		<table class="min-w-full text-sm">
-			<thead class="bg-gray-50">
-				<tr>
-					<th class="px-6 py-2 text-left font-medium text-gray-700">Prompt</th>
-					<th class="px-6 py-2 text-left font-medium text-gray-700">Status</th>
-					<th class="px-6 py-2 text-right font-medium text-gray-700">Actions</th>
-				</tr>
-			</thead>
-			<tbody class="divide-y divide-gray-100">
-				{#each KNOWN_PROMPTS as name (name)}
-					{@const output = findOutput(name)}
-					{@const job = getJob(name)}
-					<tr>
-						<td class="px-6 py-2">
-							<div class="font-medium text-gray-900">{PROMPT_LABELS[name]}</div>
-							<div class="font-mono text-xs text-gray-500">{name}</div>
-						</td>
-						<td class="px-6 py-2">
+	<!-- Left column: prompt list -->
+	<div class="overflow-y-auto border-r border-line bg-panel p-5">
+		<div class="space-y-[10px]">
+			{#each KNOWN_PROMPTS as name (name)}
+				{@const output = findOutput(name)}
+				{@const job = getJob(name)}
+				{@const isViewing = viewerOpen === name}
+				<div
+					class="rounded-[11px] border bg-card p-4 transition-all duration-150
+						{isViewing && output
+							? 'border-navy bg-navy-soft/30 shadow-[0_2px_8px_rgba(30,58,95,0.08)]'
+							: 'border-line hover:shadow-[0_6px_20px_rgba(40,35,25,0.10)] hover:-translate-y-px'}"
+				>
+					<div class="flex items-start gap-3">
+						<!-- Title column -->
+						<div class="min-w-0 flex-1">
+							<div class="font-serif text-[16px] font-semibold text-ink leading-tight">
+								{PROMPT_LABELS[name]}
+							</div>
+							<div class="mt-1 font-serif text-[13px] font-normal text-ink-2 leading-[1.4]">
+								{PROMPT_DESCRIPTIONS[name]}
+							</div>
+						</div>
+
+						<!-- Action area -->
+						<div class="shrink-0">
 							{#if job}
-								<JobStatusBadge status={job.status} progress={job.progress} />
-								{#if job.status === 'running'}
-									<div class="mt-1 w-32"><ProgressBar value={job.progress} /></div>
-								{/if}
-							{:else if output}
-								<JobStatusBadge status="completed" />
-								<div class="mt-0.5 text-[10px] text-gray-500">
-									{output.latency_s.toFixed(1)}s · {output.model}
+								<div>
+									<JobStatusBadge status={job.status} progress={job.progress} />
+									{#if job.status === 'running'}
+										<div class="mt-2 w-24"><ProgressBar value={job.progress} tone="navy" /></div>
+									{/if}
 								</div>
+							{:else if output}
+								<Button
+									variant={isViewing ? 'primary' : 'secondary'}
+									size="sm"
+									onclick={() => void viewMarkdown(name)}
+								>{isViewing ? 'Viewing' : 'View'}</Button>
 							{:else}
-								<span class="text-xs text-gray-400">—</span>
-							{/if}
-						</td>
-						<td class="px-6 py-2 text-right">
-							{#if output}
-								<Button variant="secondary" size="sm" onclick={() => void viewMarkdown(name)}>View</Button>
-							{/if}
-							{#if !output && !job}
 								<Button variant="primary" size="sm" onclick={() => void trigger(name)}>Run</Button>
 							{/if}
-						</td>
-					</tr>
-				{/each}
-			</tbody>
-		</table>
-	</div>
-</div>
+						</div>
+					</div>
 
-{#if viewerOpen}
-	<div
-		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-		onclick={closeViewer}
-		onkeydown={(e) => e.key === 'Escape' && closeViewer()}
-		role="dialog"
-		aria-modal="true"
-		tabindex="-1"
-	>
-		<div
-			class="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-lg bg-white p-6 shadow-xl"
-			onclick={(e) => e.stopPropagation()}
-			role="document"
-		>
-			<div class="mb-4 flex items-center justify-between">
-				<h3 class="text-sm font-semibold text-gray-700">{PROMPT_LABELS[viewerOpen]}</h3>
-				<Button variant="secondary" size="sm" onclick={closeViewer}>Close</Button>
-			</div>
-			{#if viewerLoading}
-				<div class="text-sm text-gray-500">Loading…</div>
-			{:else}
-				<MarkdownViewer markdown={viewerMarkdown} />
-			{/if}
+					{#if output && !job}
+						<div class="mt-2.5 font-sans text-[11px] text-ink-3">
+							{output.latency_s.toFixed(1)}s · {output.model}
+						</div>
+					{/if}
+				</div>
+			{/each}
 		</div>
 	</div>
-{/if}
+
+	<!-- Right column: output viewer -->
+	<div class="overflow-y-auto bg-paper p-[26px]">
+		{#if viewerOpen && (findOutput(viewerOpen) || viewerLoading)}
+			<!-- Navy-soft callout header -->
+			<div class="mb-4 rounded-r-[8px] border-l-4 border-navy bg-navy-soft px-4 py-3">
+				<div class="font-sans text-[10px] font-semibold uppercase tracking-[0.6px] text-navy">
+					Suggested Objection
+				</div>
+				<div class="mt-1 font-serif text-[18px] font-semibold text-ink leading-tight">
+					{PROMPT_LABELS[viewerOpen]}
+				</div>
+			</div>
+
+			<div class="rounded-[14px] border border-line bg-card p-6 shadow-[0_1px_2px_rgba(40,35,25,0.04)]">
+				{#if viewerLoading}
+					<div class="font-sans text-[13px] text-ink-2">Loading…</div>
+				{:else}
+					<div class="prose prose-sm max-w-none">
+						<MarkdownViewer markdown={viewerMarkdown} />
+					</div>
+				{/if}
+			</div>
+		{:else}
+			<div class="flex h-full flex-col items-center justify-center">
+				<EmptyState
+					title="Select a prompt"
+					description="Click View on a completed prompt to read its analysis here."
+				/>
+			</div>
+		{/if}
+	</div>
+</div>

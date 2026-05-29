@@ -15,52 +15,91 @@
 	function fmtUsd(v: number): string {
 		return `$${v.toFixed(4)}`;
 	}
+
+	function fmtUsdSplit(v: number): { sign: string; value: string } {
+		const s = v.toFixed(4);
+		return { sign: '$', value: s };
+	}
+
 	function fmtTok(v: number): string {
-		return v.toLocaleString('en-US');
+		if (v >= 1_000_000) return (v / 1_000_000).toFixed(1) + 'M';
+		if (v >= 1_000) return Math.round(v / 1_000) + 'k';
+		return String(v);
 	}
 </script>
 
-<div class="space-y-4">
+<div class="h-full overflow-y-auto bg-paper p-[26px]">
 	{#if statsStore.loading && !stats}
-		<div class="grid grid-cols-3 gap-3">
+		<div class="grid grid-cols-3 gap-4">
 			{#each Array(3) as _, i (i)}
-				<div class="h-20 animate-pulse rounded-lg border border-gray-200 bg-gray-100"></div>
+				<div class="h-24 animate-pulse rounded-[14px] border border-line bg-card"></div>
 			{/each}
 		</div>
 	{:else if statsStore.error && !stats}
 		<EmptyState title="Couldn't load stats" description={statsStore.error} />
 	{:else if stats}
-		<div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
-			<div class="rounded-lg border border-gray-200 bg-white p-4">
-				<div class="text-xs uppercase tracking-wide text-gray-500">Total cost</div>
-				<div class="mt-1 text-2xl font-semibold text-gray-900">
-					{fmtUsd(stats.ocr_cost_usd + stats.prompt_cost_usd)}
+		<!-- KPI cards -->
+		<div class="mb-5 grid grid-cols-3 gap-4">
+			<!-- Total cost card -->
+			<div class="rounded-[14px] border border-line bg-card p-5 shadow-[0_1px_2px_rgba(40,35,25,0.04)]">
+				<div class="font-sans text-[10px] font-semibold uppercase tracking-[0.6px] text-ink-3 mb-2">
+					Total cost
 				</div>
-				<div class="mt-2 text-xs text-gray-500">
-					OCR {fmtUsd(stats.ocr_cost_usd)} · Prompts {fmtUsd(stats.prompt_cost_usd)}
+				<div class="flex items-baseline gap-0.5 font-serif text-[28px] font-semibold text-ink">
+					<span class="text-[18px] text-ink-3">$</span>{(stats.ocr_cost_usd + stats.prompt_cost_usd).toFixed(4)}
+				</div>
+				<div class="mt-1.5 font-sans text-[11px] text-ink-3">
+					OCR: {fmtUsd(stats.ocr_cost_usd)} · Prompts: {fmtUsd(stats.prompt_cost_usd)}
 				</div>
 			</div>
-			<div class="rounded-lg border border-gray-200 bg-white p-4">
-				<div class="text-xs uppercase tracking-wide text-gray-500">Tokens</div>
-				<div class="mt-1 text-2xl font-semibold text-gray-900">
+
+			<!-- Tokens card -->
+			<div class="rounded-[14px] border border-line bg-card p-5 shadow-[0_1px_2px_rgba(40,35,25,0.04)]">
+				<div class="font-sans text-[10px] font-semibold uppercase tracking-[0.6px] text-ink-3 mb-2">
+					Tokens
+				</div>
+				<div class="font-serif text-[28px] font-semibold text-ink">
 					{fmtTok(stats.total_in_tokens + stats.total_out_tokens)}
 				</div>
-				<div class="mt-2 text-xs text-gray-500">
-					In {fmtTok(stats.total_in_tokens)} · Out {fmtTok(stats.total_out_tokens)}
+				<div class="mt-1.5 font-sans text-[11px] text-ink-3">
+					In: {fmtTok(stats.total_in_tokens)} · Out: {fmtTok(stats.total_out_tokens)}
 				</div>
 			</div>
-			<div class="rounded-lg border border-gray-200 bg-white p-4">
-				<div class="text-xs uppercase tracking-wide text-gray-500">Runs</div>
-				<div class="mt-1 text-2xl font-semibold text-gray-900">
+
+			<!-- Runs card -->
+			<div class="rounded-[14px] border border-line bg-card p-5 shadow-[0_1px_2px_rgba(40,35,25,0.04)]">
+				<div class="font-sans text-[10px] font-semibold uppercase tracking-[0.6px] text-ink-3 mb-2">
+					Runs
+				</div>
+				<div class="font-serif text-[28px] font-semibold text-ink">
 					{stats.ocr_runs + stats.prompt_runs}
 				</div>
-				<div class="mt-2 text-xs text-gray-500">
-					OCR {stats.ocr_runs} · Prompts {stats.prompt_runs}
+				<div class="mt-1.5 font-sans text-[11px] text-ink-3">
+					OCR: {stats.ocr_runs} · Prompts: {stats.prompt_runs}
 				</div>
 			</div>
 		</div>
-		<div class="flex justify-end">
-			<Button variant="secondary" onclick={() => void statsStore.loadProject(projectId)}>Refresh</Button>
+
+		<!-- Run history table -->
+		<div class="rounded-[14px] border border-line bg-card overflow-hidden shadow-[0_1px_2px_rgba(40,35,25,0.04)]">
+			<div class="border-b border-line px-[22px] py-[13px]">
+				<div class="font-sans text-[10px] font-semibold uppercase tracking-[0.6px] text-ink-3">
+					Run history
+				</div>
+			</div>
+
+			<!-- StatsPanel doesn't fetch run-history rows today; leaving table empty -->
+			<div class="px-[22px] py-3">
+				<EmptyState title="No runs yet" description="Run history will appear here once jobs complete." />
+			</div>
 		</div>
+
+		<div class="mt-4 flex justify-end">
+			<Button variant="secondary" size="sm" onclick={() => void statsStore.loadProject(projectId)}>
+				Refresh
+			</Button>
+		</div>
+	{:else}
+		<EmptyState title="No stats yet" description="Run OCR or prompts to see usage statistics here." />
 	{/if}
 </div>
