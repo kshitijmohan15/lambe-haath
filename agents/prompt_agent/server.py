@@ -186,18 +186,23 @@ def _run_one_prompt(
     )
 
     if cache_name:
-        # Cache hit or freshly created — user message becomes a minimal pointer;
-        # the full chargesheet content is already in the Gemini cache resource.
-        user_prompt = "Now perform the analysis described in the system instructions, using the cached chargesheet content above."
+        # Gemini rejects cached_content + system_instruction together (HTTP 400
+        # INVALID_ARGUMENT). Embed the per-prompt system prompt as a prefix of
+        # the user message and pass an empty system_instruction on the call.
+        # The cached resource still holds only the slices+RUDs (shared across
+        # all prompts); only the small, per-prompt system prompt is sent inline.
+        user_prompt = f"{system_prompt}\n\nNow perform the analysis above using the cached chargesheet content."
+        effective_system_prompt = ""
     else:
         # Cache unavailable (non-Gemini model, content too small, SDK error, etc.)
         # — fall back to existing inline assembly.
         user_prompt = _assemble_user_prompt(spec, slices_map, ruds_list, on_log)
+        effective_system_prompt = system_prompt
 
     on_progress(0.20, f"calling {model}")
     completion = clients.run_completion(
         model=model,
-        system_prompt=system_prompt,
+        system_prompt=effective_system_prompt,
         user_prompt=user_prompt,
         on_log=on_log,
         cached_content=cache_name,

@@ -106,7 +106,12 @@ def _run_gemini(
     client = genai.Client()
     started = time.time()
 
-    config_kwargs: dict = {"system_instruction": system_prompt}
+    # Gemini does not allow cached_content and system_instruction together.
+    # server.py is responsible for only setting one (empty system_prompt when
+    # cache_name is present). We defensively forward whatever was passed.
+    config_kwargs: dict = {}
+    if system_prompt:  # non-empty string
+        config_kwargs["system_instruction"] = system_prompt
     if cached_content:
         config_kwargs["cached_content"] = cached_content
 
