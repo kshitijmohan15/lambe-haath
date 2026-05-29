@@ -166,7 +166,7 @@
 					<ExtractionsPanel projectId={project.id} />
 				</div>
 			{:else if activeStage === 'analyze'}
-				<div class="px-[40px] py-[26px]">
+				<div class="h-full">
 					<PromptsPanel projectId={project.id} />
 				</div>
 			{:else if activeStage === 'review'}
