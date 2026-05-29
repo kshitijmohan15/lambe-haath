@@ -206,11 +206,19 @@ pub fn spawn(
     for (agent_spec.args, 0..) |arg, i| argv[1 + i] = arg;
 
     // Build environment: inherit parent env, add LAMBE_MODEL.
-    // On POSIX, use std.c.environ to get the current process environment.
+    //
+    // On Windows `Environ.Block` is `GlobalBlock` (the env is read from the PEB
+    // at `createMap` time, no slice needed). On POSIX it's `PosixBlock` and
+    // we pass `std.c.environ` directly. The two API shapes don't share a
+    // common constructor, so this has to comptime-switch.
     var env_map = blk: {
-        const c_environ: [*:null]?[*:0]const u8 = @ptrCast(std.c.environ);
-        const env_slice: [:null]const ?[*:0]const u8 = std.mem.span(c_environ);
-        const environ: std.process.Environ = .{ .block = .{ .slice = env_slice } };
+        const environ: std.process.Environ = if (@import("builtin").os.tag == .windows)
+            .{ .block = .global }
+        else env_blk: {
+            const c_environ: [*:null]?[*:0]const u8 = @ptrCast(std.c.environ);
+            const env_slice: [:null]const ?[*:0]const u8 = std.mem.span(c_environ);
+            break :env_blk .{ .block = .{ .slice = env_slice } };
+        };
         break :blk try std.process.Environ.createMap(environ, gpa);
     };
     defer env_map.deinit();
