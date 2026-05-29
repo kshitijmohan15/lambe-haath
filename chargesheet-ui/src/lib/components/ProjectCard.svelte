@@ -58,7 +58,7 @@
 
 <a
 	href={`/projects/${project.id}`}
-	class="group relative block rounded-card border border-line bg-card p-5 transition-all duration-150 hover:-translate-y-px hover:shadow-[0_6px_20px_rgba(40,35,25,0.10)]"
+	class="group relative block rounded-card border border-line bg-card p-5 transition-all duration-150 hover:-translate-y-px hover:shadow-[0_6px_20px_rgba(40,35,25,0.10)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-navy/40"
 	style="box-shadow: 0 1px 2px rgba(40,35,25,0.04);"
 >
 	<!-- Header: matter name + filename column (flex-1 min-w-0 critical) + progress ring -->

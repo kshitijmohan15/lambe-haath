@@ -33,7 +33,7 @@
 		{#if secondaryLabel}
 			<button
 				onclick={onSecondary}
-				class="whitespace-nowrap rounded-[8px] border border-line bg-card px-[15px] py-[9px] font-sans text-[12.5px] font-semibold text-ink transition-colors hover:border-ink-2"
+				class="whitespace-nowrap rounded-[8px] border border-line bg-card px-[15px] py-[9px] font-sans text-[12.5px] font-semibold text-ink transition-colors hover:border-navy/40 focus:outline-none focus:ring-2 focus:ring-navy/30"
 			>
 				{secondaryLabel}
 			</button>
@@ -42,7 +42,7 @@
 			<button
 				onclick={onPrimary}
 				disabled={primaryDisabled}
-				class="whitespace-nowrap rounded-[8px] bg-navy px-[17px] py-[9px] font-sans text-[12.5px] font-semibold text-white transition-colors hover:bg-navy-dk disabled:cursor-not-allowed disabled:opacity-40"
+				class="whitespace-nowrap rounded-[8px] bg-navy px-[17px] py-[9px] font-sans text-[12.5px] font-semibold text-white transition-colors hover:bg-navy-dk focus:outline-none focus:ring-2 focus:ring-navy/30 disabled:cursor-not-allowed disabled:opacity-40"
 			>
 				{primaryLabel}
 			</button>

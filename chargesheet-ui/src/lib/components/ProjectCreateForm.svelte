@@ -119,7 +119,7 @@
 		</span>
 		<label
 			for="proj-file"
-			class="block cursor-pointer rounded-[11px] border border-dashed px-4 py-8 text-center transition-colors {dragging
+			class="block cursor-pointer rounded-[11px] border border-dashed px-4 py-8 text-center transition-colors focus-within:border-navy focus-within:ring-2 focus-within:ring-navy/20 {dragging
 				? 'border-navy bg-navy-soft/30'
 				: 'border-line bg-paper hover:border-navy hover:bg-navy-soft/30'}"
 			ondragover={onDragOver}

@@ -236,30 +236,39 @@
 </div>
 
 {#if viewerOpen}
+	<!-- Backdrop -->
 	<div
-		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+		class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/40 backdrop-blur-sm"
 		onclick={closeViewer}
 		onkeydown={(e) => e.key === 'Escape' && closeViewer()}
 		role="dialog"
 		aria-modal="true"
 		tabindex="-1"
 	>
+		<!-- Modal panel -->
 		<div
-			class="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-[14px] bg-card p-6 shadow-xl"
+			class="relative mx-auto my-12 flex max-h-[80vh] w-full max-w-3xl flex-col rounded-[14px] border border-line bg-card shadow-[0_30px_60px_rgba(40,35,25,0.25)]"
 			onclick={(e) => e.stopPropagation()}
 			role="document"
 		>
-			<div class="mb-4 flex items-center justify-between">
-				<h3 class="font-mono text-[13px] text-ink-2">{viewerOpen}</h3>
-				<Button variant="secondary" size="sm" onclick={closeViewer}>Close</Button>
+			<!-- Header -->
+			<div class="flex flex-shrink-0 items-center justify-between border-b border-line px-6 py-4">
+				<h3 class="font-serif text-[18px] font-semibold text-ink">{viewerOpen}</h3>
+				<button
+					type="button"
+					onclick={closeViewer}
+					aria-label="Close"
+					class="rounded px-2 py-1 text-[20px] leading-none text-ink-3 transition-colors hover:bg-panel hover:text-ink focus:outline-none focus:ring-2 focus:ring-navy/30"
+				>×</button>
 			</div>
-			{#if viewerLoading}
-				<div class="font-sans text-[13px] text-ink-2">Loading…</div>
-			{:else}
-				<div class="prose prose-sm max-w-none">
-					<MarkdownViewer markdown={viewerMarkdown} />
-				</div>
-			{/if}
+			<!-- Content -->
+			<div class="flex-1 overflow-y-auto px-8 py-6">
+				{#if viewerLoading}
+					<div class="font-sans text-[13px] text-ink-2">Loading…</div>
+				{:else}
+					<MarkdownViewer markdown={viewerMarkdown} class="prose-a:text-navy prose-code:rounded prose-code:bg-panel prose-code:px-1 prose-code:font-mono prose-code:text-[12px]" />
+				{/if}
+			</div>
 		</div>
 	</div>
 {/if}

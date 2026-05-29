@@ -58,7 +58,7 @@
 		</div>
 		<button
 			onclick={() => (switcherOpen = !switcherOpen)}
-			class="flex w-full items-center justify-between gap-2 rounded-[9px] bg-card px-3 py-[10px] text-left transition-colors"
+			class="flex w-full items-center justify-between gap-2 rounded-[9px] bg-card px-3 py-[10px] text-left transition-colors focus:outline-none focus:ring-2 focus:ring-navy/30"
 			style="border: 1px solid {switcherOpen ? 'var(--color-navy)' : 'var(--color-line)'};"
 		>
 			<div class="min-w-0">
@@ -81,7 +81,7 @@
 				{#each projectsStore.projects as p (p.id)}
 					<button
 						onclick={() => pick(p.id)}
-						class="w-full border-b border-line-2 px-[13px] py-[10px] text-left transition-colors hover:bg-navy-soft/50"
+						class="w-full border-b border-line-2 px-[13px] py-[10px] text-left transition-colors hover:bg-navy-soft/50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-navy/30"
 						class:bg-navy-soft={p.id === project.id}
 					>
 						<div class="font-sans text-[12.5px] font-semibold text-ink">{p.name}</div>
@@ -92,7 +92,7 @@
 				{/each}
 				<button
 					onclick={() => pick('__all')}
-					class="w-full bg-panel px-[13px] py-[10px] text-left font-sans text-[12px] font-semibold text-navy"
+					class="w-full bg-panel px-[13px] py-[10px] text-left font-sans text-[12px] font-semibold text-navy hover:bg-navy-soft/50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-navy/30"
 				>
 					← All matters
 				</button>
@@ -115,7 +115,7 @@
 				{@const prog = stageProgress[s.key] ?? 0}
 				<button
 					onclick={() => onStage(s.key)}
-					class="relative mb-0.5 flex w-full gap-3 rounded-[9px] px-[7px] py-[9px] text-left transition-colors"
+					class="relative mb-0.5 flex w-full gap-3 rounded-[9px] px-[7px] py-[9px] text-left transition-colors focus:outline-none focus:ring-2 focus:ring-navy/30"
 					class:bg-navy-soft={isActive}
 				>
 					<div
