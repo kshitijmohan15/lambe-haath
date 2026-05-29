@@ -5,6 +5,7 @@
 	import { toastsStore } from '$lib/stores/toasts.svelte';
 	import { listSlices } from '$lib/api/slices';
 	import { getExtractionMarkdown } from '$lib/api/extractions';
+	import { listProjectJobs } from '$lib/api/jobs';
 	import type { SliceListingItem } from '$lib/api/types';
 	import Button from './Button.svelte';
 	import EmptyState from './EmptyState.svelte';
@@ -43,11 +44,37 @@
 	}
 
 	onMount(() => {
-		void reloadAll();
+		void hydrate();
 		return () => {
 			jobsStore.stopAll();
 		};
 	});
+
+	async function hydrate() {
+		await reloadAll();
+		// Re-attach polling for any running OCR jobs on the daemon (survives refresh).
+		try {
+			const running = await listProjectJobs(projectId, 'running');
+			for (const j of running) {
+				if (j.type !== 'ocr') continue;
+				const payload = j.payload as { slice_filename?: string };
+				const sf = payload?.slice_filename;
+				if (!sf) continue;
+				// Only track if we don't already have a job for this slice.
+				if (jobBySlice.has(sf)) continue;
+				jobBySlice.set(sf, j.job_id);
+				jobsStore.track(projectId, j.job_id, () => {
+					void extractionsStore.load(projectId);
+					jobBySlice.delete(sf);
+					jobBySlice = new Map(jobBySlice);
+				});
+			}
+			jobBySlice = new Map(jobBySlice);
+		} catch (e) {
+			// Non-fatal — UI still works without recovery; just no auto-resume.
+			console.warn('jobs hydrate failed', e);
+		}
+	}
 
 	async function triggerOcr(sliceFilename: string) {
 		try {

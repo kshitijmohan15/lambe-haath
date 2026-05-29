@@ -6,6 +6,7 @@
 	import { extractionsStore } from '$lib/stores/extractions.svelte';
 	import { KNOWN_PROMPTS, getPromptMarkdown } from '$lib/api/prompts';
 	import type { KnownPromptName } from '$lib/api/prompts';
+	import { listProjectJobs } from '$lib/api/jobs';
 	import Button from './Button.svelte';
 	import JobStatusBadge from './JobStatusBadge.svelte';
 	import ProgressBar from './ProgressBar.svelte';
@@ -35,11 +36,37 @@
 	}
 
 	onMount(() => {
-		void reload();
+		void hydrate();
 		return () => {
 			jobsStore.stopAll();
 		};
 	});
+
+	async function hydrate() {
+		await reload();
+		// Re-attach polling for any running prompt jobs on the daemon (survives refresh).
+		try {
+			const running = await listProjectJobs(projectId, 'running');
+			for (const j of running) {
+				if (j.type !== 'prompt') continue;
+				const payload = j.payload as { prompt_name?: string };
+				const pn = payload?.prompt_name as KnownPromptName | undefined;
+				if (!pn || !KNOWN_PROMPTS.includes(pn)) continue;
+				// Only track if we don't already have a job for this prompt.
+				if (jobByPrompt.has(pn)) continue;
+				jobByPrompt.set(pn, j.job_id);
+				jobsStore.track(projectId, j.job_id, () => {
+					void promptOutputsStore.load(projectId);
+					jobByPrompt.delete(pn);
+					jobByPrompt = new Map(jobByPrompt);
+				});
+			}
+			jobByPrompt = new Map(jobByPrompt);
+		} catch (e) {
+			// Non-fatal — UI still works without recovery; just no auto-resume.
+			console.warn('jobs hydrate failed', e);
+		}
+	}
 
 	function findOutput(name: KnownPromptName) {
 		return promptOutputsStore.findByName(name);

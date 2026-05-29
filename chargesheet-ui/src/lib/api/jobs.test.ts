@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { getJob, getJobLogs, cancelJob } from './jobs';
+import { getJob, getJobLogs, cancelJob, listProjectJobs } from './jobs';
 
 beforeEach(() => {
 	vi.unstubAllGlobals();
@@ -38,5 +38,17 @@ describe('jobs API', () => {
 		vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 202 })));
 
 		await expect(cancelJob('job-abc')).resolves.toBeUndefined();
+	});
+
+	it('listProjectJobs filters by status', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async () => new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }))
+		);
+		await listProjectJobs('p_abc', 'running');
+		expect(fetch).toHaveBeenCalledWith(
+			expect.stringContaining('/api/v1/projects/p_abc/jobs?status=running'),
+			expect.objectContaining({ method: 'GET' })
+		);
 	});
 });

@@ -20,6 +20,7 @@ export type LogLevel = z.infer<typeof s.LogLevelSchema>;
 export type JobLogEntry = z.infer<typeof s.JobLogEntrySchema>;
 export type JobLogsResponse = z.infer<typeof s.JobLogsResponseSchema>;
 export type Job = z.infer<typeof s.JobSchema>;
+export type JobListEntry = z.infer<typeof s.JobListEntrySchema>;
 export type KindTotals = z.infer<typeof s.KindTotalsSchema>;
 export type ModelTotals = z.infer<typeof s.ModelTotalsSchema>;
 export type ProjectTotals = z.infer<typeof s.ProjectTotalsSchema>;
