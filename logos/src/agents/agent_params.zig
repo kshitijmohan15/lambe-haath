@@ -119,7 +119,8 @@ pub fn buildPromptParams(
     try buf.appendSlice(gpa, ",\"slices\":{");
     var first_slice = true;
     for (extractions) |ex| {
-        if (annexureStem(ex.slice_filename)) |stem| {
+        var stem_buf: [32]u8 = undefined;
+        if (annexureStem(ex.slice_filename, &stem_buf)) |stem| {
             if (!first_slice) try buf.appendSlice(gpa, ",");
             try appendJsonStr(gpa, &buf, stem);
             try buf.appendSlice(gpa, ":{\"markdown_path\":");
@@ -134,13 +135,10 @@ pub fn buildPromptParams(
     try buf.appendSlice(gpa, ",\"ruds\":[");
     var first_rud = true;
     for (extractions) |ex| {
-        if (rudIdSuffix(ex.slice_filename)) |suffix| {
-            // Construct "RUD-<SUFFIX>" uppercased — suffix is e.g. "01".
-            // Digits are already uppercase, but handle alpha chars defensively.
+        var suf_buf: [8]u8 = undefined;
+        if (rudIdSuffix(ex.slice_filename, &suf_buf)) |suffix| {
             const rid = try std.fmt.allocPrint(gpa, "RUD-{s}", .{suffix});
             defer gpa.free(rid);
-            for (rid[4..]) |*ch| ch.* = std.ascii.toUpper(ch.*);
-
             if (!first_rud) try buf.appendSlice(gpa, ",");
             try buf.appendSlice(gpa, "{\"id\":");
             try appendJsonStr(gpa, &buf, rid);
@@ -163,20 +161,70 @@ pub fn buildPromptParams(
     return try buf.toOwnedSlice(gpa);
 }
 
-/// If `filename` is `annexure-X.pdf`, return the stem `annexure-X` (no .pdf).
-/// The returned slice aliases the input — do not free separately.
-fn annexureStem(filename: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, filename, "annexure-")) return null;
-    if (!std.mem.endsWith(u8, filename, ".pdf")) return null;
-    return filename[0 .. filename.len - 4];
+/// Roman numerals 1..10 keyed by index (so ROMAN[0] = "i", ROMAN[3] = "iv", etc.)
+const ROMAN = [_][]const u8{ "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x" };
+
+/// Strip the .pdf extension (case-insensitive), lowercase the rest, and drop any
+/// non-alphanumeric characters (spaces, hyphens, underscores). Returns a slice
+/// of `scratch` containing the normalized form, or null if the result doesn't
+/// fit. Used to make annexure/RUD classification tolerant of naming variants.
+fn normalize(filename: []const u8, scratch: *[64]u8) ?[]const u8 {
+    var body = filename;
+    if (body.len >= 4) {
+        const ext = body[body.len - 4 ..];
+        if (std.ascii.eqlIgnoreCase(ext, ".pdf")) body = body[0 .. body.len - 4];
+    }
+    var n: usize = 0;
+    for (body) |c| {
+        if (std.ascii.isAlphanumeric(c)) {
+            if (n >= scratch.len) return null;
+            scratch[n] = std.ascii.toLower(c);
+            n += 1;
+        }
+    }
+    return scratch[0..n];
 }
 
-/// If `filename` is `rud-NN.pdf`, return the numeric suffix `NN` (e.g. "01").
-/// The returned slice aliases the input — do not free separately.
-fn rudIdSuffix(filename: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, filename, "rud-")) return null;
-    if (!std.mem.endsWith(u8, filename, ".pdf")) return null;
-    return filename[4 .. filename.len - 4];
+/// Convert a normalized suffix to its canonical roman form (i, ii, ..., x).
+/// Accepts either roman ("i", "iv") or arabic ("1", "4") input. Range 1-10.
+fn romanFromSuffix(s: []const u8) ?[]const u8 {
+    for (ROMAN) |r| if (std.mem.eql(u8, s, r)) return r;
+    const n = std.fmt.parseInt(u32, s, 10) catch return null;
+    if (n < 1 or n > ROMAN.len) return null;
+    return ROMAN[n - 1];
+}
+
+/// If `filename` is some variant of an annexure slice, write the canonical key
+/// (e.g. "annexure-iv") into `out` and return that slice. Tolerates `Annexure1`,
+/// `AnnexureII`, `annexure-i`, `ANNEXURE I`, etc. Returns null if it doesn't
+/// look like an annexure.
+fn annexureStem(filename: []const u8, out: *[32]u8) ?[]const u8 {
+    var scratch: [64]u8 = undefined;
+    const normalized = normalize(filename, &scratch) orelse return null;
+    if (!std.mem.startsWith(u8, normalized, "annexure")) return null;
+    const suffix = normalized["annexure".len..];
+    if (suffix.len == 0) return null;
+    const roman = romanFromSuffix(suffix) orelse return null;
+    var fw = std.Io.Writer.fixed(out);
+    fw.print("annexure-{s}", .{roman}) catch return null;
+    return fw.buffered();
+}
+
+/// If `filename` is some variant of a RUD slice, write the zero-padded 2-digit
+/// numeric suffix (e.g. "01", "23") into `out` and return that slice. Tolerates
+/// `Rud-01`, `RUD01`, `rud 1`, `RUD-1`, etc. Returns null if it doesn't look
+/// like a RUD.
+fn rudIdSuffix(filename: []const u8, out: *[8]u8) ?[]const u8 {
+    var scratch: [64]u8 = undefined;
+    const normalized = normalize(filename, &scratch) orelse return null;
+    if (!std.mem.startsWith(u8, normalized, "rud")) return null;
+    const suffix = normalized["rud".len..];
+    if (suffix.len == 0) return null;
+    const n = std.fmt.parseInt(u32, suffix, 10) catch return null;
+    if (n < 1 or n > 999) return null;
+    var fw = std.Io.Writer.fixed(out);
+    fw.print("{d:0>2}", .{n}) catch return null;
+    return fw.buffered();
 }
 
 // ---------------------------------------------------------------------------
@@ -273,4 +321,45 @@ test "buildPromptParams classifies annexures vs ruds" {
     try std.testing.expect(std.mem.indexOf(u8, params, "\"annexure-i\":{\"markdown_path\":\"/data/p1/extractions/annexure-i.md\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, params, "\"RUD-01\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, params, "\"output_dir\":\"/data/p1/prompt_outputs\"") != null);
+}
+
+test "annexureStem accepts naming variants" {
+    var out: [32]u8 = undefined;
+    // Canonical
+    try std.testing.expectEqualStrings("annexure-i", annexureStem("annexure-i.pdf", &out).?);
+    try std.testing.expectEqualStrings("annexure-iv", annexureStem("annexure-iv.pdf", &out).?);
+    // Title case, no separator
+    try std.testing.expectEqualStrings("annexure-i", annexureStem("Annexure1.pdf", &out).?);
+    try std.testing.expectEqualStrings("annexure-ii", annexureStem("AnnexureII.pdf", &out).?);
+    try std.testing.expectEqualStrings("annexure-iv", annexureStem("Annexure4.pdf", &out).?);
+    // Uppercase with space
+    try std.testing.expectEqualStrings("annexure-iii", annexureStem("ANNEXURE III.pdf", &out).?);
+    try std.testing.expectEqualStrings("annexure-iii", annexureStem("ANNEXURE 3.pdf", &out).?);
+    // Mixed case hyphen
+    try std.testing.expectEqualStrings("annexure-i", annexureStem("Annexure-I.pdf", &out).?);
+    // Case-insensitive extension
+    try std.testing.expectEqualStrings("annexure-ii", annexureStem("Annexure2.PDF", &out).?);
+    // Non-matches
+    try std.testing.expect(annexureStem("foo.pdf", &out) == null);
+    try std.testing.expect(annexureStem("annexure-99.pdf", &out) == null);
+    try std.testing.expect(annexureStem("annexure-.pdf", &out) == null);
+    try std.testing.expect(annexureStem("annexure-xyz.pdf", &out) == null);
+}
+
+test "rudIdSuffix accepts naming variants" {
+    var out: [8]u8 = undefined;
+    // Canonical
+    try std.testing.expectEqualStrings("01", rudIdSuffix("rud-01.pdf", &out).?);
+    try std.testing.expectEqualStrings("23", rudIdSuffix("rud-23.pdf", &out).?);
+    // Title case, no separator
+    try std.testing.expectEqualStrings("01", rudIdSuffix("Rud1.pdf", &out).?);
+    try std.testing.expectEqualStrings("01", rudIdSuffix("RUD-1.pdf", &out).?);
+    // Uppercase with space
+    try std.testing.expectEqualStrings("07", rudIdSuffix("RUD 7.pdf", &out).?);
+    // Already 2-digit
+    try std.testing.expectEqualStrings("99", rudIdSuffix("RUD99.pdf", &out).?);
+    // Non-matches
+    try std.testing.expect(rudIdSuffix("annexure-i.pdf", &out) == null);
+    try std.testing.expect(rudIdSuffix("rud.pdf", &out) == null);
+    try std.testing.expect(rudIdSuffix("rud-abc.pdf", &out) == null);
 }
