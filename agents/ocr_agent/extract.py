@@ -226,6 +226,26 @@ def _extract_chunk(
     return _strip_outer_fence(text), latency, input_tokens, output_tokens
 
 
+def absolute_page_range(start_page: int, slice_start: int, slice_end: int) -> tuple[int, int]:
+    """Convert a slice-internal 1-based, inclusive page range to absolute page
+    numbers in the original document.
+
+    `start_page` is the absolute page number of the slice's first page within
+    the original document (so slice-internal page 1 ↔ absolute page start_page).
+    `(slice_start, slice_end)` is a 1-based inclusive range within the slice.
+
+    Returns the equivalent 1-based inclusive range in the original document.
+
+    Examples (all 1-based inclusive):
+        absolute_page_range(1,  1, 10) == (1, 10)    # slice IS the document
+        absolute_page_range(70, 1, 101) == (70, 170) # AnnexureII spanning 101 pages
+        absolute_page_range(70, 1, 1)   == (70, 70)  # single-page slice
+        absolute_page_range(70, 41, 80) == (110, 149) # mid-document chunk
+    """
+    offset = start_page - 1
+    return slice_start + offset, slice_end + offset
+
+
 def _build_page_index(md: str) -> list[dict]:
     matches = list(PAGE_MARKER_RE.finditer(md))
     pages: list[dict] = []
@@ -295,14 +315,12 @@ def extract_and_save(
             on_log("info", msg)
 
         # `start_page` parameter is the absolute starting page in the original
-        # document. _chunk_pdf yields 1-based positions within the SLICE; offset
-        # them so emitted page markers and chunk metadata reflect absolute
-        # positions (e.g., AnnexureII.pdf with start_page=70 produces markers
-        # 70..170 instead of 1..101).
-        page_offset = start_page - 1
+        # document. _chunk_pdf yields 1-based positions within the SLICE; map
+        # them to absolute via absolute_page_range so emitted markers and
+        # chunk metadata reflect the original (e.g., AnnexureII.pdf with
+        # start_page=70 produces markers 70..170 instead of 1..101).
         for idx, (slice_start, slice_end, chunk_path, chunk_size) in enumerate(chunks):
-            abs_start = slice_start + page_offset
-            abs_end = slice_end + page_offset
+            abs_start, abs_end = absolute_page_range(start_page, slice_start, slice_end)
             msg = f"Chunk pages {abs_start}-{abs_end}: {chunk_size / 1024 / 1024:.1f} MB"
             logger.info(msg)
             if on_log:
