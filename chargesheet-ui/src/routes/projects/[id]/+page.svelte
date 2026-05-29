@@ -14,9 +14,15 @@
 	import { promptOutputsStore } from '$lib/stores/promptOutputs.svelte';
 	import { toastsStore } from '$lib/stores/toasts.svelte';
 	import { canSubmitAll } from '$lib/utils/validation';
+	import { page } from '$app/state';
+	import { replaceState } from '$app/navigation';
 	import type { PageData } from './$types';
 
 	type Stage = 'slice' | 'extract' | 'analyze' | 'review';
+	const STAGES: readonly Stage[] = ['slice', 'extract', 'analyze', 'review'] as const;
+	function parseStage(s: string | null | undefined): Stage {
+		return s && (STAGES as readonly string[]).includes(s) ? (s as Stage) : 'slice';
+	}
 
 	// Known prompt count — there are 5 known prompts in KNOWN_PROMPTS (PromptsPanel)
 	const KNOWN_PROMPT_COUNT = 5;
@@ -26,7 +32,15 @@
 
 	let submitting = $state(false);
 	let producedReloadKey = $state(0);
-	let activeStage = $state<Stage>('slice');
+	let activeStage = $state<Stage>(parseStage(page.url.searchParams.get('stage')));
+
+	function setStage(s: Stage) {
+		activeStage = s;
+		const u = new URL(page.url);
+		if (s === 'slice') u.searchParams.delete('stage');
+		else u.searchParams.set('stage', s);
+		replaceState(u, page.state);
+	}
 
 	async function trySubmit() {
 		if (submitting || pdfStore.pageCount === null) return;
@@ -135,7 +149,7 @@
 	<PipelineRail
 		{project}
 		stage={activeStage}
-		onStage={(s) => (activeStage = s)}
+		onStage={setStage}
 		{stageProgress}
 	/>
 
