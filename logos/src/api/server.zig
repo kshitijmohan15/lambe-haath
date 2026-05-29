@@ -43,6 +43,7 @@ pub const ServeOptions = struct {
     version: []const u8,
     data_dir: []const u8,
     ui_dir: []const u8,
+    agents_dir: []const u8,
     dispatcher: ?*Dispatcher = null,
 };
 
@@ -158,6 +159,7 @@ fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Serv
         .projects_jobs_prompt_all => respondProjectsJobsPromptAll(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .projects_prompts_list => respondProjectsPromptsList(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .projects_prompts_get => respondProjectsPromptsGet(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
+        .projects_prompts_export => respondProjectsPromptsExport(io, gpa, db, request, target, opts.data_dir, opts.agents_dir, m.id orelse return respondNotFound(gpa, request)),
         .jobs_cancel => respondJobsCancel(gpa, request, opts.dispatcher, m.id orelse return respondNotFound(gpa, request)),
         .jobs_logs => respondJobsLogs(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .jobs_stream => respondJobsStream(io, db, request, req_mutex, m.id orelse return respondNotFound(gpa, request)),
@@ -1144,6 +1146,77 @@ fn respondProjectsPromptsGet(
     } ++ cors_headers;
 
     try request.respond(result.markdown_bytes, .{ .status = .ok, .extra_headers = &headers });
+}
+
+fn respondProjectsPromptsExport(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    target: []const u8,
+    data_dir: []const u8,
+    agents_dir: []const u8,
+    project_id: []const u8,
+) !void {
+    // Required: format=md|docx. Optional: names=csv.
+    const format_raw = extractQueryParam(target, "format") orelse {
+        return respondError(request, .bad_request, "INVALID_REQUEST", "format= query param is required (md or docx)");
+    };
+    const format: handlers_prompts.ExportFormat =
+        if (std.mem.eql(u8, format_raw, "md")) .md
+        else if (std.mem.eql(u8, format_raw, "docx")) .docx
+        else return respondError(request, .bad_request, "INVALID_REQUEST", "format must be md or docx");
+
+    const names_csv = extractQueryParam(target, "names");
+
+    const result = handlers_prompts.handleExportPrompts(io, gpa, db, data_dir, agents_dir, project_id, format, names_csv) catch |err| {
+        const status: std.http.Status = switch (err) {
+            error.InvalidRequest => .bad_request,
+            error.ProjectNotFound, error.PromptNotFound => .not_found,
+            else => .internal_server_error,
+        };
+        const code: []const u8 = switch (err) {
+            error.InvalidRequest => "INVALID_REQUEST",
+            error.ProjectNotFound, error.PromptNotFound => "NOT_FOUND",
+            else => "INTERNAL_ERROR",
+        };
+        const msg: []const u8 = switch (err) {
+            error.ExporterFailed => "Export subprocess failed (is Python + python-docx + mistune installed?)",
+            else => "Could not export prompts",
+        };
+        return respondError(request, status, code, msg);
+    };
+    defer result.deinit(gpa);
+
+    // Read the tempfile into memory, then unlink it.
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, result.temp_path, gpa, .limited(64 * 1024 * 1024)) catch |err| {
+        // Best-effort unlink even on read failure.
+        std.Io.Dir.cwd().deleteFile(io, result.temp_path) catch {};
+        return switch (err) {
+            error.FileNotFound => respondError(request, .internal_server_error, "INTERNAL_ERROR", "Exporter produced no output"),
+            else => respondError(request, .internal_server_error, "INTERNAL_ERROR", "Could not read exported file"),
+        };
+    };
+    defer gpa.free(bytes);
+    std.Io.Dir.cwd().deleteFile(io, result.temp_path) catch {};
+
+    const content_type: []const u8 = if (result.is_zip)
+        "application/zip"
+    else if (format == .docx)
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    else
+        "text/markdown; charset=utf-8";
+
+    var disposition_buf: [256]u8 = undefined;
+    const disposition = std.fmt.bufPrint(&disposition_buf, "attachment; filename=\"{s}\"", .{result.suggested_filename}) catch
+        "attachment";
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = content_type },
+        .{ .name = "Content-Disposition", .value = disposition },
+    } ++ cors_headers;
+
+    try request.respond(bytes, .{ .status = .ok, .extra_headers = &headers });
 }
 
 fn respondJobsCancel(

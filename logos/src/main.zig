@@ -153,7 +153,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout_writer.flush();
 
     const api_server = @import("api/server.zig");
-    api_server.serve(io, gpa, &db, &req_mutex, .{ .port = port, .version = version, .data_dir = config.data_dir, .ui_dir = config.ui_dir, .dispatcher = &disp }) catch |err| switch (err) {
+    api_server.serve(io, gpa, &db, &req_mutex, .{ .port = port, .version = version, .data_dir = config.data_dir, .ui_dir = config.ui_dir, .agents_dir = config.agents_dir, .dispatcher = &disp }) catch |err| switch (err) {
         error.AddressInUse => {
             // We hold the lock for THIS data_dir, but the port is taken by some
             // other process (e.g. a daemon left running on another data_dir, or

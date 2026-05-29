@@ -24,6 +24,7 @@ pub const Route = enum {
     projects_jobs_prompt_all,
     projects_prompts_list,
     projects_prompts_get,
+    projects_prompts_export,
     jobs_cancel,
     jobs_logs,
     jobs_stream,
@@ -170,6 +171,12 @@ pub fn match(method: Method, raw_path: []const u8) Match {
     // /api/v1/projects/:id/prompts/...
     if (std.mem.eql(u8, after_id, "prompts") and method == .GET) {
         return .{ .route = .projects_prompts_list, .id = id };
+    }
+    // /api/v1/projects/:id/prompts/export — must come BEFORE the catch-all
+    // prompts/:prompt_name matcher below, otherwise "export" would be parsed
+    // as a prompt name.
+    if (method == .GET and std.mem.eql(u8, after_id, "prompts/export")) {
+        return .{ .route = .projects_prompts_export, .id = id };
     }
     if (std.mem.startsWith(u8, after_id, "prompts/")) {
         const prompt_name = after_id["prompts/".len..];
@@ -333,4 +340,23 @@ test "router matches GET /api/v1/stats/slow" {
 test "router matches GET /api/v1/stats/slow with query string" {
     const m = match(.GET, "/api/v1/stats/slow?limit=5");
     try testing.expectEqual(Route.stats_slow, m.route);
+}
+
+test "router matches GET /api/v1/projects/:id/prompts/export with format param" {
+    const m = match(.GET, "/api/v1/projects/proj_abc/prompts/export?format=docx");
+    try testing.expectEqual(Route.projects_prompts_export, m.route);
+    try testing.expectEqualStrings("proj_abc", m.id.?);
+}
+
+test "router matches GET /api/v1/projects/:id/prompts/export without query" {
+    const m = match(.GET, "/api/v1/projects/proj_abc/prompts/export");
+    try testing.expectEqual(Route.projects_prompts_export, m.route);
+    try testing.expectEqualStrings("proj_abc", m.id.?);
+}
+
+test "router still matches prompts/:name after adding export route" {
+    const m = match(.GET, "/api/v1/projects/proj_abc/prompts/charge_memo_analysis");
+    try testing.expectEqual(Route.projects_prompts_get, m.route);
+    try testing.expectEqualStrings("proj_abc", m.id.?);
+    try testing.expectEqualStrings("charge_memo_analysis", m.child.?);
 }
