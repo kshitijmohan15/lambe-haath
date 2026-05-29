@@ -13,6 +13,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Db = @import("../db/db.zig").Db;
 const extractions_mod = @import("../db/extractions.zig");
+const slices_mod = @import("../db/slices.zig");
 
 /// Append a JSON string literal (with surrounding quotes) to `buf`.
 /// Handles the same escapes as api/json.zig:writeJsonString.
@@ -40,11 +41,15 @@ fn appendJsonStr(gpa: Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
 /// Build params JSON for an OCR job.
 ///
 /// Input: job.payload looks like `{"slice_filename":"annexure-i.pdf"}`.
-/// Output: `{"slice_path":"<data_dir>/<proj>/slices/<file>","output_dir":"<data_dir>/<proj>/extractions","job_id":"...","_meta":{"progressToken":"..."}}`.
+/// Output: `{"slice_path":"...","output_dir":"...","start_page":<int>,"job_id":"...","_meta":{...}}`.
+/// `start_page` is the absolute page number of the slice's first page within the
+/// original chargesheet (looked up from the slices table). Defaults to 1 if the
+/// slice isn't found in the DB.
 ///
 /// Caller owns the returned slice.
 pub fn buildOcrParams(
     gpa: Allocator,
+    db: *Db,
     data_dir: []const u8,
     job_id: []const u8,
     project_id: []const u8,
@@ -63,6 +68,16 @@ pub fn buildOcrParams(
     const output_dir = try std.fs.path.join(gpa, &.{ data_dir, project_id, "extractions" });
     defer gpa.free(output_dir);
 
+    // Look up the slice's origin start_page (1-based, absolute within the
+    // original chargesheet). Defaults to 1 for slices not in the DB (which
+    // shouldn't happen in normal flow but keeps OCR from crashing).
+    var start_page: u32 = 1;
+    if (try slices_mod.getByKey(db, gpa, project_id, slice_filename)) |slice| {
+        var s = slice;
+        defer s.deinit(gpa);
+        start_page = s.start_page;
+    }
+
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(gpa);
 
@@ -70,6 +85,12 @@ pub fn buildOcrParams(
     try appendJsonStr(gpa, &buf, slice_path);
     try buf.appendSlice(gpa, ",\"output_dir\":");
     try appendJsonStr(gpa, &buf, output_dir);
+    try buf.appendSlice(gpa, ",\"start_page\":");
+    {
+        const start_page_str = try std.fmt.allocPrint(gpa, "{d}", .{start_page});
+        defer gpa.free(start_page_str);
+        try buf.appendSlice(gpa, start_page_str);
+    }
     try buf.appendSlice(gpa, ",\"job_id\":");
     try appendJsonStr(gpa, &buf, job_id);
     try buf.appendSlice(gpa, ",\"_meta\":{\"progressToken\":");
@@ -231,28 +252,65 @@ fn rudIdSuffix(filename: []const u8, out: *[8]u8) ?[]const u8 {
 // Tests
 // ---------------------------------------------------------------------------
 
-test "buildOcrParams produces the agent's expected shape" {
+test "buildOcrParams produces the agent's expected shape with start_page" {
+    var db = try Db.open(":memory:");
+    defer db.close();
     const gpa = std.testing.allocator;
+
+    const test_helpers = @import("../db/test_helpers.zig");
+    try test_helpers.insertProject(&db, "proj_xyz");
+    try slices_mod.insert(&db, gpa, .{
+        .project_id = "proj_xyz",
+        .filename = "annexure-ii.pdf",
+        .start_page = 70,
+        .end_page = 170,
+        .size_bytes = 1024,
+        .kind = .annexure,
+        .kind_key = "ii",
+        .created_at = "2026-05-28T00:00:00Z",
+    });
+
     const params = try buildOcrParams(
         gpa,
+        &db,
         "/tmp/data",
         "job_abc",
         "proj_xyz",
-        "{\"slice_filename\":\"annexure-i.pdf\"}",
+        "{\"slice_filename\":\"annexure-ii.pdf\"}",
     );
     defer gpa.free(params);
 
-    try std.testing.expect(std.mem.indexOf(u8, params, "\"slice_path\":\"/tmp/data/proj_xyz/slices/annexure-i.pdf\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, params, "\"slice_path\":\"/tmp/data/proj_xyz/slices/annexure-ii.pdf\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, params, "\"output_dir\":\"/tmp/data/proj_xyz/extractions\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, params, "\"start_page\":70") != null);
     try std.testing.expect(std.mem.indexOf(u8, params, "\"job_id\":\"job_abc\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, params, "\"progressToken\":\"job_abc\"") != null);
 }
 
+test "buildOcrParams defaults start_page to 1 when slice not in DB" {
+    var db = try Db.open(":memory:");
+    defer db.close();
+    const gpa = std.testing.allocator;
+
+    const params = try buildOcrParams(
+        gpa,
+        &db,
+        "/tmp/data",
+        "job_abc",
+        "proj_xyz",
+        "{\"slice_filename\":\"orphan.pdf\"}",
+    );
+    defer gpa.free(params);
+    try std.testing.expect(std.mem.indexOf(u8, params, "\"start_page\":1") != null);
+}
+
 test "buildOcrParams errors on missing slice_filename" {
+    var db = try Db.open(":memory:");
+    defer db.close();
     const gpa = std.testing.allocator;
     try std.testing.expectError(
         error.MissingSliceFilename,
-        buildOcrParams(gpa, "/tmp/data", "job_abc", "proj_xyz", "{\"prompt_name\":\"x\"}"),
+        buildOcrParams(gpa, &db, "/tmp/data", "job_abc", "proj_xyz", "{\"prompt_name\":\"x\"}"),
     );
 }
 

@@ -97,6 +97,9 @@ def _handle_ocr_extract(msg_id: int, params: dict) -> None:
         {
           "slice_path": "/path/to/slice.pdf",
           "output_dir": "/path/to/output_dir",
+          "start_page": 70,                  # optional; absolute page number of
+                                             # the slice's first page within the
+                                             # original chargesheet. Defaults to 1.
           "_meta": {"progressToken": "j17"}  # optional
         }
     """
@@ -108,6 +111,14 @@ def _handle_ocr_extract(msg_id: int, params: dict) -> None:
             "slice_path and output_dir are required",
         ))
         return
+
+    start_page_raw = params.get("start_page", 1)
+    try:
+        start_page = int(start_page_raw)
+        if start_page < 1:
+            start_page = 1
+    except (TypeError, ValueError):
+        start_page = 1
 
     pdf = Path(slice_path)
     out = Path(output_dir)
@@ -136,7 +147,7 @@ def _handle_ocr_extract(msg_id: int, params: dict) -> None:
         ))
 
     try:
-        result = extract_and_save(pdf, out, on_progress=on_progress, on_log=on_log)
+        result = extract_and_save(pdf, out, on_progress=on_progress, on_log=on_log, start_page=start_page)
     except Exception as exc:
         log.exception("ocr.extract failed")
         framing.write_line(framing.encode_error(

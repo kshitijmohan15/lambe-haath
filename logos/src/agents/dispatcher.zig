@@ -382,16 +382,23 @@ pub const Dispatcher = struct {
         // Build agent-specific params JSON.
         const agent_params = @import("agent_params.zig");
         const params = switch (job_type) {
-            .ocr => agent_params.buildOcrParams(
-                self.gpa,
-                self.data_dir,
-                job.id,
-                job.project_id,
-                job.payload,
-            ) catch |err| {
-                std.log.warn("buildOcrParams failed for job {s}: {s}", .{ job.id, @errorName(err) });
-                self.sup.release(worker);
-                return;
+            .ocr => blk: {
+                self.db_mu.lockUncancelable(self.io);
+                const p = agent_params.buildOcrParams(
+                    self.gpa,
+                    self.db,
+                    self.data_dir,
+                    job.id,
+                    job.project_id,
+                    job.payload,
+                ) catch |err| {
+                    self.db_mu.unlock(self.io);
+                    std.log.warn("buildOcrParams failed for job {s}: {s}", .{ job.id, @errorName(err) });
+                    self.sup.release(worker);
+                    return;
+                };
+                self.db_mu.unlock(self.io);
+                break :blk p;
             },
             .prompt => blk: {
                 self.db_mu.lockUncancelable(self.io);

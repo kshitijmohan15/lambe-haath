@@ -245,6 +245,7 @@ def extract_and_save(
     output_dir: Path,
     on_progress: Optional[Callable[[float, str], None]] = None,
     on_log: Optional[Callable[[str, str], None]] = None,
+    start_page: int = 1,
 ) -> dict:
     """Extract a PDF to markdown + meta.json under output_dir.
 
@@ -253,6 +254,10 @@ def extract_and_save(
         output_dir: Directory where markdown and meta.json will be written.
         on_progress: Optional callback(progress: float 0-1, message: str) for chunk completion.
         on_log: Optional callback(level: str, message: str) for log messages.
+        start_page: Absolute page number of pdf_path's first page within the
+            original (pre-sliced) document. Page markers in the output markdown
+            will be numbered start_page .. start_page + total_pages - 1. Defaults
+            to 1 (standalone PDF, no offset).
 
     Returns:
         {"markdown_path": Path, "meta_path": Path, "metadata": dict}.
@@ -289,19 +294,27 @@ def extract_and_save(
         if on_log:
             on_log("info", msg)
 
-        for idx, (start_page, end_page, chunk_path, chunk_size) in enumerate(chunks):
-            msg = f"Chunk pages {start_page}-{end_page}: {chunk_size / 1024 / 1024:.1f} MB"
+        # `start_page` parameter is the absolute starting page in the original
+        # document. _chunk_pdf yields 1-based positions within the SLICE; offset
+        # them so emitted page markers and chunk metadata reflect absolute
+        # positions (e.g., AnnexureII.pdf with start_page=70 produces markers
+        # 70..170 instead of 1..101).
+        page_offset = start_page - 1
+        for idx, (slice_start, slice_end, chunk_path, chunk_size) in enumerate(chunks):
+            abs_start = slice_start + page_offset
+            abs_end = slice_end + page_offset
+            msg = f"Chunk pages {abs_start}-{abs_end}: {chunk_size / 1024 / 1024:.1f} MB"
             logger.info(msg)
             if on_log:
                 on_log("info", msg)
 
             md, latency, in_tok, out_tok = _extract_chunk(
-                client, chunk_path, start_page, end_page, model, on_log=on_log
+                client, chunk_path, abs_start, abs_end, model, on_log=on_log
             )
             parts.append(md)
             chunks_meta.append({
-                "start_page": start_page,
-                "end_page": end_page,
+                "start_page": abs_start,
+                "end_page": abs_end,
                 "size_bytes": chunk_size,
                 "latency_s": round(latency, 2),
                 "input_tokens": in_tok,
