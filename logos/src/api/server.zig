@@ -43,7 +43,11 @@ pub const ServeOptions = struct {
     version: []const u8,
     data_dir: []const u8,
     ui_dir: []const u8,
-    agents_dir: []const u8,
+    /// Parent of the `agents/` Python package directory. Same value the
+    /// supervisor passes to worker spawns. Subprocesses we launch (e.g. the
+    /// exporter for prompt downloads) run with this as cwd so
+    /// `python3 -m agents.<name>` resolves the package.
+    agents_parent_dir: []const u8,
     dispatcher: ?*Dispatcher = null,
 };
 
@@ -159,7 +163,7 @@ fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Serv
         .projects_jobs_prompt_all => respondProjectsJobsPromptAll(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .projects_prompts_list => respondProjectsPromptsList(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .projects_prompts_get => respondProjectsPromptsGet(io, gpa, db, request, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
-        .projects_prompts_export => respondProjectsPromptsExport(io, gpa, db, request, target, opts.data_dir, opts.agents_dir, m.id orelse return respondNotFound(gpa, request)),
+        .projects_prompts_export => respondProjectsPromptsExport(io, gpa, db, request, target, opts.data_dir, opts.agents_parent_dir, m.id orelse return respondNotFound(gpa, request)),
         .jobs_cancel => respondJobsCancel(gpa, request, opts.dispatcher, m.id orelse return respondNotFound(gpa, request)),
         .jobs_logs => respondJobsLogs(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .jobs_stream => respondJobsStream(io, db, request, req_mutex, m.id orelse return respondNotFound(gpa, request)),
@@ -1155,7 +1159,7 @@ fn respondProjectsPromptsExport(
     request: *http.Server.Request,
     target: []const u8,
     data_dir: []const u8,
-    agents_dir: []const u8,
+    agents_parent_dir: []const u8,
     project_id: []const u8,
 ) !void {
     // Required: format=md|docx. Optional: names=csv.
@@ -1169,7 +1173,7 @@ fn respondProjectsPromptsExport(
 
     const names_csv = extractQueryParam(target, "names");
 
-    const result = handlers_prompts.handleExportPrompts(io, gpa, db, data_dir, agents_dir, project_id, format, names_csv) catch |err| {
+    const result = handlers_prompts.handleExportPrompts(io, gpa, db, data_dir, agents_parent_dir, project_id, format, names_csv) catch |err| {
         const status: std.http.Status = switch (err) {
             error.InvalidRequest => .bad_request,
             error.ProjectNotFound, error.PromptNotFound => .not_found,

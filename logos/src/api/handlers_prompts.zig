@@ -361,7 +361,10 @@ pub fn handleExportPrompts(
     gpa: Allocator,
     db: *Db,
     data_dir: []const u8,
-    agents_dir: []const u8,
+    /// Parent of the `agents/` package — used as cwd for the subprocess so
+    /// `python3 -m agents.exporter` resolves the package. Mirrors the value
+    /// the supervisor passes to worker spawns.
+    agents_parent_dir: []const u8,
     project_id: []const u8,
     format: ExportFormat,
     names_csv: ?[]const u8,
@@ -459,7 +462,7 @@ pub fn handleExportPrompts(
         .stdout = .inherit,
         .stderr = .inherit,
         .environ_map = &env_map,
-        .cwd = .{ .path = agents_dir },
+        .cwd = .{ .path = agents_parent_dir },
     }) catch return error.ExporterFailed;
     errdefer child.kill(io);
 
