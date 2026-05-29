@@ -10,9 +10,11 @@ pub const ModelRate = struct {
 };
 
 pub const PRICING: []const ModelRate = &.{
-    .{ .model = "gemini-2.5-flash",  .input_per_million_usd = 0.30, .output_per_million_usd = 2.50 },
-    .{ .model = "gemini-2.5-pro",    .input_per_million_usd = 1.25, .output_per_million_usd = 10.00 },
-    .{ .model = "claude-sonnet-4-6", .input_per_million_usd = 3.00, .output_per_million_usd = 15.00 },
+    .{ .model = "gemini-2.5-flash",        .input_per_million_usd = 0.30, .output_per_million_usd = 2.50 },
+    .{ .model = "gemini-2.5-pro",          .input_per_million_usd = 1.25, .output_per_million_usd = 10.00 },
+    .{ .model = "claude-sonnet-4-6",       .input_per_million_usd = 3.00, .output_per_million_usd = 15.00 },
+    .{ .model = "gemini-3.5-flash",        .input_per_million_usd = 1.50, .output_per_million_usd = 9.00 },
+    .{ .model = "gemini-3.1-pro-preview",  .input_per_million_usd = 1.25, .output_per_million_usd = 10.00 },
 };
 
 pub fn lookup(model: []const u8) ?ModelRate {
