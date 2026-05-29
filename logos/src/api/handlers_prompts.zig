@@ -284,6 +284,222 @@ pub fn handleGetPromptMarkdown(
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/v1/projects/:id/prompts/export
+// ---------------------------------------------------------------------------
+//
+// Query params:
+//   format=md|docx       (required)
+//   names=foo,bar,baz    (optional; CSV; if absent → all known prompts that
+//                         have outputs)
+//
+// Behavior:
+//   - Looks up prompt_output rows for the project, filtered by names if given.
+//   - 0 matched rows → PromptNotFound.
+//   - 1 matched row → spawns `python3 -m agents.exporter --output <tmp>` in
+//                     mode=single, returns the single file (no zip).
+//   - 2+ rows       → spawns in mode=bundle, returns a .zip.
+//
+// The handler writes the spec to the child's stdin as one line of JSON,
+// closes stdin, waits for exit. Exit 0 → result file is at `temp_path`.
+// Caller (server.zig) must stream that file and unlink it.
+
+pub const ExportFormat = enum { md, docx };
+
+pub const ExportError = error{
+    InvalidRequest,
+    ProjectNotFound,
+    PromptNotFound,
+    ExporterFailed,
+    IoError,
+    OutOfMemory,
+    DbError,
+};
+
+/// Result of GET /prompts/export. Caller owns `temp_path` AND must unlink the
+/// file at that path after streaming.
+pub const ExportResult = struct {
+    temp_path: []u8,
+    is_zip: bool,
+    /// Suggested download filename (e.g. "prompts.zip" or "evidence_audit.docx").
+    suggested_filename: []u8,
+
+    pub fn deinit(self: ExportResult, gpa: Allocator) void {
+        gpa.free(self.temp_path);
+        gpa.free(self.suggested_filename);
+    }
+};
+
+/// Parse the comma-separated `names` query param into a list of allocated
+/// strings. Returns an empty list if `csv` is null or empty.
+fn parseNamesCsv(gpa: Allocator, csv: ?[]const u8) ![][]u8 {
+    if (csv == null or csv.?.len == 0) return try gpa.alloc([]u8, 0);
+    var list: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (list.items) |s| gpa.free(s);
+        list.deinit(gpa);
+    }
+    var it = std.mem.tokenizeScalar(u8, csv.?, ',');
+    while (it.next()) |tok| {
+        if (tok.len == 0) continue;
+        const dup = try gpa.dupe(u8, tok);
+        try list.append(gpa, dup);
+    }
+    return try list.toOwnedSlice(gpa);
+}
+
+/// Match `name` against the `KNOWN_PROMPTS` whitelist. Used to reject
+/// caller-controlled values before they reach the subprocess.
+fn isKnownPrompt(name: []const u8) bool {
+    for (KNOWN_PROMPTS) |kp| {
+        if (std.mem.eql(u8, kp, name)) return true;
+    }
+    return false;
+}
+
+pub fn handleExportPrompts(
+    io: std.Io,
+    gpa: Allocator,
+    db: *Db,
+    data_dir: []const u8,
+    /// Parent of the `agents/` package — used as cwd for the subprocess so
+    /// `python3 -m agents.exporter` resolves the package. Mirrors the value
+    /// the supervisor passes to worker spawns.
+    agents_parent_dir: []const u8,
+    project_id: []const u8,
+    format: ExportFormat,
+    names_csv: ?[]const u8,
+) ExportError!ExportResult {
+    // 1. Validate project exists.
+    const maybe_project = projects_mod.getById(db, gpa, project_id) catch return error.DbError;
+    if (maybe_project == null) return error.ProjectNotFound;
+    var project = maybe_project.?;
+    project.deinit(gpa);
+
+    // 2. Parse the names filter.
+    const requested = parseNamesCsv(gpa, names_csv) catch return error.OutOfMemory;
+    defer {
+        for (requested) |s| gpa.free(s);
+        gpa.free(requested);
+    }
+    // Reject anything that isn't on the known list to prevent path injection
+    // via the spawned process spec.
+    for (requested) |n| {
+        if (!isKnownPrompt(n)) return error.InvalidRequest;
+    }
+
+    // 3. Look up prompt_output rows.
+    const all_outputs = prompt_outputs_mod.listByProject(db, gpa, project_id) catch return error.DbError;
+    defer prompt_outputs_mod.deinitList(all_outputs, gpa);
+
+    // Filter: if requested is non-empty, intersect with it; otherwise take all.
+    // The PromptOutput entries reference memory owned by `all_outputs`, so we
+    // only need to free our list's spine here, not the contents.
+    var selected: std.ArrayList(prompt_outputs_mod.PromptOutput) = .empty;
+    defer selected.deinit(gpa);
+    for (all_outputs) |out| {
+        if (requested.len == 0) {
+            try selected.append(gpa, out);
+        } else {
+            for (requested) |n| {
+                if (std.mem.eql(u8, n, out.prompt_name)) {
+                    try selected.append(gpa, out);
+                    break;
+                }
+            }
+        }
+    }
+    if (selected.items.len == 0) return error.PromptNotFound;
+
+    const mode_single = selected.items.len == 1;
+    const ext: []const u8 = if (mode_single)
+        (if (format == .docx) ".docx" else ".md")
+    else
+        ".zip";
+
+    // 4. Build a tempfile path under <data_dir>/.exports/<uuid><ext>.
+    const exports_dir = try std.fs.path.join(gpa, &.{ data_dir, ".exports" });
+    defer gpa.free(exports_dir);
+    std.Io.Dir.cwd().createDirPath(io, exports_dir) catch return error.IoError;
+
+    const uid = ids.generateJobId(io, gpa) catch return error.OutOfMemory;
+    defer gpa.free(uid);
+    const temp_basename = std.fmt.allocPrint(gpa, "{s}{s}", .{ uid, ext }) catch return error.OutOfMemory;
+    defer gpa.free(temp_basename);
+    const temp_path = std.fs.path.join(gpa, &.{ exports_dir, temp_basename }) catch return error.OutOfMemory;
+    errdefer gpa.free(temp_path);
+
+    // 5. Build the spec JSON for stdin.
+    var spec_buf: std.ArrayList(u8) = .empty;
+    defer spec_buf.deinit(gpa);
+    try spec_buf.appendSlice(gpa, "{\"format\":\"");
+    try spec_buf.appendSlice(gpa, if (format == .docx) "docx" else "md");
+    try spec_buf.appendSlice(gpa, "\",\"mode\":\"");
+    try spec_buf.appendSlice(gpa, if (mode_single) "single" else "bundle");
+    try spec_buf.appendSlice(gpa, "\",\"items\":[");
+    for (selected.items, 0..) |out, i| {
+        if (i > 0) try spec_buf.append(gpa, ',');
+        try spec_buf.appendSlice(gpa, "{\"name\":");
+        try appendJsonString(&spec_buf, gpa, out.prompt_name);
+        try spec_buf.appendSlice(gpa, ",\"md_path\":");
+        try appendJsonString(&spec_buf, gpa, out.markdown_path);
+        try spec_buf.append(gpa, '}');
+    }
+    try spec_buf.appendSlice(gpa, "]}\n");
+
+    // 6. Spawn `python3 -m agents.exporter --output <temp_path>` from agents_dir.
+    const argv = [_][]const u8{ "python3", "-m", "agents.exporter", "--output", temp_path };
+    var env_map = blk: {
+        const c_environ: [*:null]?[*:0]const u8 = @ptrCast(std.c.environ);
+        const env_slice: [:null]const ?[*:0]const u8 = std.mem.span(c_environ);
+        const environ: std.process.Environ = .{ .block = .{ .slice = env_slice } };
+        break :blk std.process.Environ.createMap(environ, gpa) catch return error.OutOfMemory;
+    };
+    defer env_map.deinit();
+
+    var child = std.process.spawn(io, .{
+        .argv = &argv,
+        .stdin = .pipe,
+        .stdout = .inherit,
+        .stderr = .inherit,
+        .environ_map = &env_map,
+        .cwd = .{ .path = agents_parent_dir },
+    }) catch return error.ExporterFailed;
+    errdefer child.kill(io);
+
+    // Write spec to stdin, close to signal EOF.
+    {
+        const stdin_file = child.stdin orelse return error.ExporterFailed;
+        var write_buf: [4096]u8 = undefined;
+        var writer = stdin_file.writer(io, &write_buf);
+        writer.interface.writeAll(spec_buf.items) catch return error.ExporterFailed;
+        writer.interface.flush() catch return error.ExporterFailed;
+        stdin_file.close(io);
+        child.stdin = null;
+    }
+
+    const term = child.wait(io) catch return error.ExporterFailed;
+    switch (term) {
+        .exited => |code| if (code != 0) return error.ExporterFailed,
+        else => return error.ExporterFailed,
+    }
+
+    // 7. Build the suggested filename.
+    const suggested = blk: {
+        if (mode_single) {
+            // <prompt_name>.<ext>
+            break :blk std.fmt.allocPrint(gpa, "{s}{s}", .{ selected.items[0].prompt_name, ext }) catch return error.OutOfMemory;
+        }
+        break :blk std.fmt.allocPrint(gpa, "prompts-{s}{s}", .{ project_id, ext }) catch return error.OutOfMemory;
+    };
+
+    return .{
+        .temp_path = temp_path,
+        .is_zip = !mode_single,
+        .suggested_filename = suggested,
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Internal: minimal JSON string writer for fixed buffers (no allocator needed)
 // ---------------------------------------------------------------------------
 
@@ -301,6 +517,28 @@ fn writeJsonStringFixed(w: *std.Io.Writer, s: []const u8) !void {
         }
     }
     try w.writeAll("\"");
+}
+
+/// Append `s` as a JSON-quoted, escaped string to `buf`. Used to build the
+/// exporter spec without juggling temporary Writers.
+fn appendJsonString(buf: *std.ArrayList(u8), gpa: Allocator, s: []const u8) !void {
+    try buf.append(gpa, '"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try buf.appendSlice(gpa, "\\\""),
+            '\\' => try buf.appendSlice(gpa, "\\\\"),
+            '\n' => try buf.appendSlice(gpa, "\\n"),
+            '\r' => try buf.appendSlice(gpa, "\\r"),
+            '\t' => try buf.appendSlice(gpa, "\\t"),
+            0...0x08, 0x0B, 0x0C, 0x0E...0x1F => {
+                var tmp: [6]u8 = undefined;
+                const written = std.fmt.bufPrint(&tmp, "\\u{x:0>4}", .{c}) catch unreachable;
+                try buf.appendSlice(gpa, written);
+            },
+            else => try buf.append(gpa, c),
+        }
+    }
+    try buf.append(gpa, '"');
 }
 
 // ---------------------------------------------------------------------------

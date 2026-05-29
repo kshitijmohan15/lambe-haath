@@ -61,8 +61,10 @@
 	class="group relative block rounded-card border border-line bg-card p-5 transition-all duration-150 hover:-translate-y-px hover:shadow-[0_6px_20px_rgba(40,35,25,0.10)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-navy/40"
 	style="box-shadow: 0 1px 2px rgba(40,35,25,0.04);"
 >
-	<!-- Header: matter name + filename column (flex-1 min-w-0 critical) + progress ring -->
-	<div class="flex items-start gap-3">
+	<!-- Header: matter name + filename column (flex-1 min-w-0 critical), delete slot, progress ring.
+	     The delete button reserves its space always (so no layout shift on hover) and uses opacity
+	     to toggle visibility. This keeps it left of the ring instead of overlapping it. -->
+	<div class="flex items-start gap-2">
 		<div class="min-w-0 flex-1">
 			<div class="truncate font-serif text-[18px] font-semibold leading-tight text-ink">
 				{project.name}
@@ -71,6 +73,24 @@
 				{citation}
 			</div>
 		</div>
+		<button
+			type="button"
+			class="flex h-8 w-8 shrink-0 items-center justify-center rounded text-ink-3 opacity-0 transition-opacity hover:bg-[rgba(162,59,46,0.08)] hover:text-err focus-visible:opacity-100 group-hover:opacity-100"
+			aria-label="Delete matter"
+			onclick={(e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				confirmOpen = true;
+			}}
+		>
+			<svg viewBox="0 0 20 20" class="h-4 w-4" fill="currentColor">
+				<path
+					fill-rule="evenodd"
+					d="M8.75 1A1.75 1.75 0 0 0 7 2.75V3H4a1 1 0 0 0 0 2h12a1 1 0 1 0 0-2h-3v-.25A1.75 1.75 0 0 0 11.25 1h-2.5ZM6 7a1 1 0 0 1 1 1v8a1 1 0 1 1-2 0V8a1 1 0 0 1 1-1Zm4 0a1 1 0 0 1 1 1v8a1 1 0 1 1-2 0V8a1 1 0 0 1 1-1Zm4 0a1 1 0 0 1 1 1v8a1 1 0 1 1-2 0V8a1 1 0 0 1 1-1Z"
+					clip-rule="evenodd"
+				/>
+			</svg>
+		</button>
 		<ProgressRing percent={completionPercent} />
 	</div>
 
@@ -96,25 +116,6 @@
 		</span>
 	</div>
 
-	<!-- Delete button (visible on group hover) -->
-	<button
-		type="button"
-		class="absolute right-3 top-3 invisible rounded p-1 text-ink-3 hover:bg-[rgba(162,59,46,0.08)] hover:text-err group-hover:visible focus-visible:visible"
-		aria-label="Delete matter"
-		onclick={(e) => {
-			e.preventDefault();
-			e.stopPropagation();
-			confirmOpen = true;
-		}}
-	>
-		<svg viewBox="0 0 20 20" class="h-4 w-4" fill="currentColor">
-			<path
-				fill-rule="evenodd"
-				d="M8.75 1A1.75 1.75 0 0 0 7 2.75V3H4a1 1 0 0 0 0 2h12a1 1 0 1 0 0-2h-3v-.25A1.75 1.75 0 0 0 11.25 1h-2.5ZM6 7a1 1 0 0 1 1 1v8a1 1 0 1 1-2 0V8a1 1 0 0 1 1-1Zm4 0a1 1 0 0 1 1 1v8a1 1 0 1 1-2 0V8a1 1 0 0 1 1-1Zm4 0a1 1 0 0 1 1 1v8a1 1 0 1 1-2 0V8a1 1 0 0 1 1-1Z"
-				clip-rule="evenodd"
-			/>
-		</svg>
-	</button>
 </a>
 
 <ConfirmDialog

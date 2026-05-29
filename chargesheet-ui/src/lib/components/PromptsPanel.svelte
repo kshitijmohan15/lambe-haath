@@ -4,8 +4,8 @@
 	import { jobsStore } from '$lib/stores/jobs.svelte';
 	import { toastsStore } from '$lib/stores/toasts.svelte';
 	import { extractionsStore } from '$lib/stores/extractions.svelte';
-	import { KNOWN_PROMPTS, getPromptMarkdown } from '$lib/api/prompts';
-	import type { KnownPromptName } from '$lib/api/prompts';
+	import { KNOWN_PROMPTS, getPromptMarkdown, triggerExportDownload } from '$lib/api/prompts';
+	import type { KnownPromptName, ExportFormat } from '$lib/api/prompts';
 	import { listProjectJobs } from '$lib/api/jobs';
 	import Button from './Button.svelte';
 	import JobStatusBadge from './JobStatusBadge.svelte';
@@ -36,6 +36,26 @@
 	let viewerLoading = $state(false);
 
 	let jobByPrompt = $state<Map<KnownPromptName, string>>(new Map());
+
+	let exportFormat = $state<ExportFormat>('md');
+
+	/** Names of prompts that have completed outputs (download-eligible). */
+	function completedNames(): KnownPromptName[] {
+		return KNOWN_PROMPTS.filter((n) => promptOutputsStore.findByName(n) !== undefined);
+	}
+
+	function exportAll() {
+		const names = completedNames();
+		if (names.length === 0) {
+			toastsStore.error('No completed prompts to export yet.');
+			return;
+		}
+		triggerExportDownload(projectId, exportFormat, names);
+	}
+
+	function exportOne(name: KnownPromptName) {
+		triggerExportDownload(projectId, exportFormat, [name]);
+	}
 
 	async function reload() {
 		await Promise.all([
@@ -143,6 +163,28 @@
 
 	<!-- Left column: prompt list -->
 	<div class="overflow-y-auto border-r border-line bg-panel p-5">
+		<!-- Export toolbar: format toggle + "Export all" button -->
+		<div class="mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
+			<div class="flex items-center gap-1.5">
+				<span class="font-sans text-[10px] font-semibold uppercase tracking-[1px] text-ink-3">Format</span>
+				<div class="inline-flex overflow-hidden rounded-md border border-line bg-card">
+					<button
+						type="button"
+						class="px-2.5 py-1 font-sans text-[11px] font-medium transition-colors
+							{exportFormat === 'md' ? 'bg-navy text-white' : 'text-ink-2 hover:bg-navy-soft/40'}"
+						onclick={() => (exportFormat = 'md')}
+					>Markdown</button>
+					<button
+						type="button"
+						class="border-l border-line px-2.5 py-1 font-sans text-[11px] font-medium transition-colors
+							{exportFormat === 'docx' ? 'bg-navy text-white' : 'text-ink-2 hover:bg-navy-soft/40'}"
+						onclick={() => (exportFormat = 'docx')}
+					>Word</button>
+				</div>
+			</div>
+			<Button variant="secondary" size="sm" onclick={exportAll}>Export folder</Button>
+		</div>
+
 		<div class="space-y-[10px]">
 			{#each KNOWN_PROMPTS as name (name)}
 				{@const output = findOutput(name)}
@@ -175,11 +217,27 @@
 									{/if}
 								</div>
 							{:else if output}
-								<Button
-									variant={isViewing ? 'primary' : 'secondary'}
-									size="sm"
-									onclick={() => void viewMarkdown(name)}
-								>{isViewing ? 'Viewing' : 'View'}</Button>
+								<div class="flex items-center gap-1.5">
+									<Button
+										variant={isViewing ? 'primary' : 'secondary'}
+										size="sm"
+										onclick={() => void viewMarkdown(name)}
+									>{isViewing ? 'Viewing' : 'View'}</Button>
+									<button
+										type="button"
+										title={`Download as ${exportFormat === 'docx' ? 'Word' : 'Markdown'}`}
+										aria-label="Download this prompt"
+										onclick={() => exportOne(name)}
+										class="rounded-md border border-line bg-card p-1.5 text-ink-2 transition-colors hover:bg-navy-soft hover:text-navy"
+									>
+										<!-- Inline download icon (no extra dependency) -->
+										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-3.5 w-3.5">
+											<path d="M12 3v12" />
+											<path d="m7 10 5 5 5-5" />
+											<path d="M5 21h14" />
+										</svg>
+									</button>
+								</div>
 							{:else}
 								<Button variant="primary" size="sm" onclick={() => void trigger(name)}>Run</Button>
 							{/if}

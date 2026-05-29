@@ -66,3 +66,49 @@ export async function getPromptMarkdown(
 		{ method: 'GET' }
 	);
 }
+
+export type ExportFormat = 'md' | 'docx';
+
+/**
+ * Build the URL the browser should navigate to in order to download an
+ * export. The endpoint sets Content-Disposition: attachment so the browser
+ * saves the response to the user's configured Downloads folder.
+ *
+ * If `names` has exactly one entry, the response is a single .md / .docx file.
+ * Otherwise (or if `names` is undefined → all prompts), it's a .zip bundle.
+ */
+export function buildPromptsExportUrl(
+	projectId: string,
+	format: ExportFormat,
+	names?: readonly KnownPromptName[]
+): string {
+	// Build the query string by hand: prompt names are `[a-z_]+` so they're
+	// URL-safe, and we explicitly want the commas LITERAL so the daemon's
+	// query parser (which does not URL-decode values) can split on them.
+	// URLSearchParams would percent-encode commas, which currently breaks the
+	// server-side tokenizer.
+	let qs = `format=${format}`;
+	if (names && names.length > 0) qs += `&names=${names.join(',')}`;
+	return `/api/v1/projects/${encodeURIComponent(projectId)}/prompts/export?${qs}`;
+}
+
+/**
+ * Trigger a download by creating a hidden <a download> and clicking it.
+ * The browser handles writing to the OS's Downloads folder.
+ */
+export function triggerExportDownload(
+	projectId: string,
+	format: ExportFormat,
+	names?: readonly KnownPromptName[]
+): void {
+	const a = document.createElement('a');
+	a.href = buildPromptsExportUrl(projectId, format, names);
+	a.rel = 'noopener';
+	// Letting the server's Content-Disposition decide the filename — leaving
+	// `download` as the empty string is enough to opt into download behavior
+	// without overriding the server's suggested name.
+	a.download = '';
+	document.body.appendChild(a);
+	a.click();
+	a.remove();
+}
