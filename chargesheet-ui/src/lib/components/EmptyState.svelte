@@ -18,27 +18,34 @@
 	let { title, description, action }: Props = $props();
 </script>
 
-<div class="flex flex-col items-center justify-center gap-3 py-16 text-center">
-	<h2 class="text-xl font-semibold text-gray-800">{title}</h2>
+<div class="flex flex-col items-center justify-center py-12 px-6 text-center">
+	<!-- icon: concentric circles glyph -->
+	<div class="mb-5 flex h-10 w-10 items-center justify-center rounded-full border-2 border-line-2 text-ink-3">
+		<div class="h-5 w-5 rounded-full border border-line text-ink-3"></div>
+	</div>
+
+	<h2 class="font-serif text-[18px] font-semibold leading-tight text-ink">{title}</h2>
 	{#if description}
-		<p class="max-w-md text-sm text-gray-500">{description}</p>
+		<p class="mt-2 max-w-[40ch] font-sans text-[13px] text-ink-2">{description}</p>
 	{/if}
 	{#if action}
-		{#if 'href' in action}
-			<a
-				href={action.href}
-				class="mt-2 inline-flex items-center rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-			>
-				{action.label}
-			</a>
-		{:else}
-			<button
-				type="button"
-				onclick={action.onClick}
-				class="mt-2 inline-flex items-center rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-			>
-				{action.label}
-			</button>
-		{/if}
+		<div class="mt-5">
+			{#if 'href' in action}
+				<a
+					href={action.href}
+					class="inline-flex items-center justify-center gap-1.5 rounded-ctl font-sans font-semibold text-[12.5px] whitespace-nowrap transition-colors bg-navy text-white border-none hover:bg-navy-dk focus:outline-none focus:ring-2 focus:ring-navy/30 px-[17px] py-[9px]"
+				>
+					{action.label}
+				</a>
+			{:else}
+				<button
+					type="button"
+					onclick={action.onClick}
+					class="inline-flex items-center justify-center gap-1.5 rounded-ctl font-sans font-semibold text-[12.5px] whitespace-nowrap transition-colors bg-navy text-white border-none hover:bg-navy-dk focus:outline-none focus:ring-2 focus:ring-navy/30 px-[17px] py-[9px]"
+				>
+					{action.label}
+				</button>
+			{/if}
+		</div>
 	{/if}
 </div>

@@ -26,27 +26,34 @@
 
 	const VARIANT_CLASSES: Record<Variant, string> = {
 		primary:
-			'bg-blue-600 text-white hover:bg-blue-700 focus-visible:outline-blue-600 disabled:bg-blue-300',
+			'bg-navy text-white border-none hover:bg-navy-dk disabled:opacity-40 disabled:cursor-not-allowed',
 		secondary:
-			'bg-white text-gray-800 border border-gray-300 hover:bg-gray-50 focus-visible:outline-gray-400 disabled:bg-gray-100 disabled:text-gray-400',
+			'bg-card text-ink border border-line hover:border-ink-2 disabled:opacity-40 disabled:cursor-not-allowed',
 		danger:
-			'bg-red-600 text-white hover:bg-red-700 focus-visible:outline-red-600 disabled:bg-red-300',
+			'bg-err text-white border-none hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed',
 		ghost:
-			'bg-transparent text-gray-700 hover:bg-gray-100 focus-visible:outline-gray-400 disabled:text-gray-400'
+			'bg-transparent text-ink-2 border-none hover:text-ink hover:bg-[rgba(40,35,25,0.06)] disabled:opacity-40 disabled:cursor-not-allowed'
 	};
 
+	// Size only adjusts padding for sm; md uses the Docket spec sizing directly.
 	const SIZE_CLASSES: Record<Size, string> = {
-		sm: 'px-2.5 py-1 text-sm',
-		md: 'px-4 py-2 text-sm'
+		sm: 'px-[13px] py-[6px] text-[11.5px]',
+		md: 'px-[17px] py-[9px] text-[12.5px]'
 	};
+
+	// Secondary size adjusts for border (1px less padding) to keep visual height consistent.
+	const SECONDARY_SIZE_CLASSES: Record<Size, string> = {
+		sm: 'px-[12px] py-[5px] text-[11.5px]',
+		md: 'px-[15px] py-[9px] text-[12.5px]'
+	};
+
+	const sizeClass = variant === 'secondary' ? SECONDARY_SIZE_CLASSES[size] : SIZE_CLASSES[size];
 </script>
 
 <button
 	{type}
 	{disabled}
-	class="inline-flex items-center justify-center gap-1.5 rounded font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed {VARIANT_CLASSES[
-		variant
-	]} {SIZE_CLASSES[size]} {full ? 'w-full' : ''} {extraClass}"
+	class="inline-flex items-center justify-center gap-1.5 rounded-ctl font-sans font-semibold whitespace-nowrap transition-colors focus:outline-none focus:ring-2 focus:ring-navy/30 {VARIANT_CLASSES[variant]} {sizeClass} {full ? 'w-full' : ''} {extraClass}"
 	{...rest}
 >
 	{@render children()}

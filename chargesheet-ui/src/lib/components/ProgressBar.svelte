@@ -1,11 +1,11 @@
 <script lang="ts">
-	let { value = 0 }: { value?: number } = $props();
+	let { value = 0, tone = 'navy' }: { value?: number; tone?: 'navy' | 'ok' } = $props();
 	const clamped = $derived(Math.max(0, Math.min(1, value)));
 </script>
 
-<div class="h-1 w-full overflow-hidden rounded-full bg-gray-200">
+<div class="h-[3px] w-full overflow-hidden rounded-full bg-line">
 	<div
-		class="h-full bg-blue-500 transition-all duration-200"
+		class="h-full rounded-full transition-[width] duration-300 {tone === 'ok' ? 'bg-ok' : 'bg-navy'}"
 		style="width: {clamped * 100}%"
 	></div>
 </div>
