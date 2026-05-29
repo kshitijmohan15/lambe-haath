@@ -1,7 +1,14 @@
-@import 'tailwindcss';
-@plugin "@tailwindcss/typography";
+/* tokens.css — Docket design tokens for Tailwind v4.
+   Append the @theme block + font imports to your existing src/app.css:
 
-/* Fonts — Public Sans (sans/UI), Spectral (serif/content), IBM Plex Mono */
+     @import 'tailwindcss';
+     @plugin "@tailwindcss/typography";
+     (paste everything below)
+
+   Every token becomes a utility: bg-paper, text-ink, border-line,
+   text-navy, bg-navy-soft, font-serif, font-mono, etc. */
+
+/* Fonts — or self-host these three families */
 @import url('https://fonts.googleapis.com/css2?family=Public+Sans:ital,wght@0,400;0,500;0,600;0,700&family=Spectral:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
 @theme {
@@ -19,7 +26,7 @@
   --color-line:   rgba(40, 35, 25, 0.11);
   --color-line-2: rgba(40, 35, 25, 0.07);
 
-  /* accent (Ink navy — default) */
+  /* accent (Ink navy) */
   --color-navy:      #1e3a5f;
   --color-navy-dk:   #152a44;
   --color-navy-soft: #eaeff5;
@@ -51,7 +58,7 @@ body {
 }
 
 /* Optional: alternate accents (set data-accent on <html> to switch).
-   Default above is Ink navy. */
+   Defaults above are Ink navy. */
 [data-accent='burgundy'] { --color-navy: #6e2433; --color-navy-dk: #551a26; --color-navy-soft: #f4ebec; }
 [data-accent='forest']   { --color-navy: #1f5c4d; --color-navy-dk: #16453a; --color-navy-soft: #e8f1ed; }
 [data-accent='slate']    { --color-navy: #3a4150; --color-navy-dk: #2a3039; --color-navy-soft: #edeef1; }
