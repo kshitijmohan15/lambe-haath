@@ -9,5 +9,11 @@
 chargesheet-ui/.svelte-kit/
 chargesheet-ui/build/
 
+# Python
+**/__pycache__/
+**/*.pyc
+.venv/
+.env
+
 # OS
 .DS_Store

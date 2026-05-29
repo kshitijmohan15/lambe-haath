@@ -44,7 +44,7 @@ test "prompt job stays queued until OCR fan-in completes" {
     var ch = event_channel_mod.EventChannel.init(gpa, io);
     defer ch.deinit();
 
-    var sup = supervisor_mod.Supervisor.init(io, gpa, &cfg, &ch);
+    var sup = supervisor_mod.Supervisor.init(io, gpa, &cfg, &ch, ".");
     defer sup.deinit();
 
     var disp = dispatcher_mod.Dispatcher.init(io, gpa, &db, &mu, &sup, &ch, "/tmp/test-data");
@@ -128,7 +128,7 @@ test "cancellation flips job to a terminal state without deadlock" {
     var ch = event_channel_mod.EventChannel.init(gpa, io);
     defer ch.deinit();
 
-    var sup = supervisor_mod.Supervisor.init(io, gpa, &cfg, &ch);
+    var sup = supervisor_mod.Supervisor.init(io, gpa, &cfg, &ch, ".");
     defer sup.deinit();
 
     var disp = dispatcher_mod.Dispatcher.init(io, gpa, &db, &mu, &sup, &ch, "/tmp/test-data");
@@ -199,7 +199,7 @@ test "OCR job runs end-to-end through dispatcher + mock agent" {
     var ch = event_channel_mod.EventChannel.init(gpa, io);
     defer ch.deinit();
 
-    var sup = supervisor_mod.Supervisor.init(io, gpa, &cfg, &ch);
+    var sup = supervisor_mod.Supervisor.init(io, gpa, &cfg, &ch, ".");
     defer sup.deinit();
 
     var disp = dispatcher_mod.Dispatcher.init(io, gpa, &db, &mu, &sup, &ch, "/tmp/test-data");

@@ -25,6 +25,10 @@ const help_body =
     \\
     \\Environment:
     \\  CHARGESHEET_DATA_DIR   Override the data directory on any platform.
+    \\  LAMBE_AGENTS_DIR       Override the Python agents/ directory.
+    \\                         Default resolution: $LAMBE_AGENTS_DIR →
+    \\                           <binary_dir>/../agents →
+    \\                           <binary_dir>/../../agents → ./agents
     \\
     \\Default data directory:
     \\  macOS    $HOME/Library/Application Support/ChargesheetTool
@@ -118,6 +122,9 @@ pub fn main(init: std.process.Init) !void {
     var agent_cfg = try agent_config_mod.loadFromDir(io, gpa, config.data_dir);
     defer agent_cfg.deinit(gpa);
 
+    // Derive the parent of the agents/ directory (used as subprocess cwd).
+    const agents_parent_dir = std.fs.path.dirname(config.agents_dir) orelse ".";
+
     // 3. Initialize the shared DB mutex, event channel, and supervisor.
     //    req_mutex serializes DB access across the HTTP threads AND the dispatcher thread.
     var req_mutex: std.Io.Mutex = .init;
@@ -125,7 +132,7 @@ pub fn main(init: std.process.Init) !void {
     var event_ch = event_channel_mod.EventChannel.init(gpa, io);
     defer event_ch.deinit();
 
-    var sup = supervisor_mod.Supervisor.init(io, gpa, &agent_cfg, &event_ch);
+    var sup = supervisor_mod.Supervisor.init(io, gpa, &agent_cfg, &event_ch, agents_parent_dir);
 
     // 4. Initialize the dispatcher.
     var disp = dispatcher_mod.Dispatcher.init(io, gpa, &db, &req_mutex, &sup, &event_ch, config.data_dir);
@@ -141,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
         sup.shutdownAll();
     }
 
-    try stdout.print("daemon running: pid={d} port={d} data_dir={s}\n", .{ getpid(), port, config.data_dir });
+    try stdout.print("daemon running: pid={d} port={d} data_dir={s} agents_dir={s}\n", .{ getpid(), port, config.data_dir, config.agents_dir });
     try stdout.print("(ctrl-C to exit)\n", .{});
     try stdout_writer.flush();
 
@@ -171,6 +178,7 @@ pub fn main(init: std.process.Init) !void {
 extern "c" fn getpid() i32;
 
 test {
+    _ = @import("paths.zig");
     _ = @import("db/db.zig");
     _ = @import("db/errors.zig");
     _ = @import("db/projects.zig");

@@ -18,16 +18,21 @@ pub const Supervisor = struct {
     io: Io,
     cfg: *const AgentConfig,
     channel: *EventChannel,
+    /// Parent directory of `agents/` — used as cwd when spawning agent subprocesses
+    /// so Python can find the `agents` package via `-m agents.<agent_name>`.
+    /// Borrowed; NOT owned by Supervisor.
+    agents_parent_dir: []const u8,
     mu: Io.Mutex = .init,
     workers: ArrayList(*Worker) = .empty,
     next_id: u64 = 1,
 
-    pub fn init(io: Io, gpa: Allocator, cfg: *const AgentConfig, channel: *EventChannel) Supervisor {
+    pub fn init(io: Io, gpa: Allocator, cfg: *const AgentConfig, channel: *EventChannel, agents_parent_dir: []const u8) Supervisor {
         return .{
             .gpa = gpa,
             .io = io,
             .cfg = cfg,
             .channel = channel,
+            .agents_parent_dir = agents_parent_dir,
         };
     }
 
@@ -72,7 +77,7 @@ pub const Supervisor = struct {
         const w_ptr = try self.gpa.create(Worker);
         errdefer self.gpa.destroy(w_ptr);
 
-        w_ptr.* = try worker_mod.spawn(self.io, self.gpa, id, spec, self.channel);
+        w_ptr.* = try worker_mod.spawn(self.io, self.gpa, id, spec, self.channel, self.agents_parent_dir);
         w_ptr.state = .busy;
 
         try self.workers.append(self.gpa, w_ptr);
@@ -194,7 +199,7 @@ test "acquire spawns first worker on demand" {
     var ch = EventChannel.init(gpa, io);
     defer ch.deinit();
 
-    var sv = Supervisor.init(io, gpa, &cfg, &ch);
+    var sv = Supervisor.init(io, gpa, &cfg, &ch, ".");
     defer sv.deinit();
 
     // First acquire spawns a new worker.
@@ -229,7 +234,7 @@ test "acquire returns null when cap reached and all busy" {
     var ch = EventChannel.init(gpa, io);
     defer ch.deinit();
 
-    var sv = Supervisor.init(io, gpa, &cfg, &ch);
+    var sv = Supervisor.init(io, gpa, &cfg, &ch, ".");
     defer sv.deinit();
 
     // First acquire: spawns a worker (now busy).
@@ -264,7 +269,7 @@ test "shutdownAll terminates all workers" {
     var ch = EventChannel.init(gpa, io);
     defer ch.deinit();
 
-    var sv = Supervisor.init(io, gpa, &cfg, &ch);
+    var sv = Supervisor.init(io, gpa, &cfg, &ch, ".");
     defer sv.deinit();
 
     // Acquire two workers (leaves one slot unused).

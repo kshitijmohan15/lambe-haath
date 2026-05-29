@@ -186,12 +186,18 @@ fn readerThreadFn(ctx_ptr: *ReaderContext) void {
 ///
 /// `io` is needed for process spawning and file I/O. It is stored in the returned
 /// Worker so callers don't need to re-supply it for sendRequest / close / kill.
+///
+/// `agents_parent_dir` is the parent of the `agents/` Python package directory.
+/// The subprocess is spawned with this as its working directory so that
+/// `python3 -m agents.<name>` can resolve the package regardless of where
+/// the daemon binary was launched from.
 pub fn spawn(
     io: Io,
     gpa: Allocator,
     id: u64,
     agent_spec: *const config.AgentSpec,
     channel: *event_channel.EventChannel,
+    agents_parent_dir: []const u8,
 ) !Worker {
     // Build argv: [command, args...]
     var argv = try gpa.alloc([]const u8, 1 + agent_spec.args.len);
@@ -212,13 +218,15 @@ pub fn spawn(
     // Set LAMBE_MODEL.
     try env_map.put("LAMBE_MODEL", agent_spec.model);
 
-    // Spawn.
+    // Spawn with the agents parent directory as cwd so Python finds the
+    // agents package via `-m agents.<name>` regardless of daemon launch dir.
     var child = try std.process.spawn(io, .{
         .argv = argv,
         .stdin = .pipe,
         .stdout = .pipe,
         .stderr = .inherit,
         .environ_map = &env_map,
+        .cwd = .{ .path = agents_parent_dir },
     });
     errdefer child.kill(io);
 
@@ -325,7 +333,7 @@ test "spawn + initialize + close against mock agent" {
     var spec = try buildSpec(gpa, path);
     defer spec.deinit(gpa);
 
-    var w = try spawn(io, gpa, 1, &spec, &ch);
+    var w = try spawn(io, gpa, 1, &spec, &ch, ".");
     try std.testing.expectEqual(State.idle, w.state);
     try std.testing.expectEqual(@as(u64, 1), w.id);
 
@@ -355,7 +363,7 @@ test "sendRequest + reader thread surfaces response on channel" {
     var spec = try buildSpec(gpa, path);
     defer spec.deinit(gpa);
 
-    var w = try spawn(io, gpa, 1, &spec, &ch);
+    var w = try spawn(io, gpa, 1, &spec, &ch, ".");
     defer w.close(gpa);
 
     const req_id = try w.sendRequest(gpa, "mock.echo", "{\"hello\":\"world\"}");

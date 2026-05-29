@@ -730,7 +730,7 @@ test "Dispatcher.init / requestStop / deinit don't leak" {
     var cfg = config_mod.AgentConfig{ .agents = &specs };
     var ch = EventChannel.init(gpa, io);
     defer ch.deinit();
-    var sup = Supervisor.init(io, gpa, &cfg, &ch);
+    var sup = Supervisor.init(io, gpa, &cfg, &ch, ".");
     defer sup.deinit();
 
     var d = Dispatcher.init(io, gpa, &db, &mu, &sup, &ch, "/tmp/test-data");
