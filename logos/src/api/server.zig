@@ -27,6 +27,7 @@ const static = @import("static.zig");
 const slices_mod = @import("../db/slices.zig");
 const extractions_mod = @import("../db/extractions.zig");
 const prompt_outputs_mod = @import("../db/prompt_outputs.zig");
+const jobs_mod = @import("../db/jobs.zig");
 const Dispatcher = @import("../agents/dispatcher.zig").Dispatcher;
 
 const cors_origin = "http://localhost:5173";
@@ -145,6 +146,7 @@ fn serveRequest(io: std.Io, gpa: std.mem.Allocator, db: *Db, request: *http.Serv
         .projects_chargesheet => respondProjectsChargesheet(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request)),
         .projects_jobs_slice => respondProjectsJobsSlice(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request)),
         .projects_jobs_get => respondProjectsJobsGet(gpa, db, request, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
+        .projects_jobs_list => respondProjectsJobsList(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .projects_slices_list => respondProjectsSlicesList(gpa, db, request, m.id orelse return respondNotFound(gpa, request)),
         .projects_slices_get => respondProjectsSlicesGet(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
         .projects_slices_delete => respondProjectsSlicesDelete(io, gpa, db, request, opts, m.id orelse return respondNotFound(gpa, request), m.child orelse return respondNotFound(gpa, request)),
@@ -620,6 +622,64 @@ fn respondProjectsJobsGet(
         job.results,
         job.error_msg,
     );
+    const body = w.buffered();
+
+    const headers = [_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+    } ++ cors_headers;
+
+    try request.respond(body, .{
+        .status = .ok,
+        .extra_headers = &headers,
+    });
+}
+
+fn respondProjectsJobsList(
+    gpa: std.mem.Allocator,
+    db: *Db,
+    request: *http.Server.Request,
+    project_id: []const u8,
+) !void {
+    // Parse ?status=<value> from the query string. Default: list all.
+    const target = request.head.target;
+    const status_str = extractQueryParam(target, "status");
+
+    const list = blk: {
+        if (status_str) |s| {
+            const status = jobs_mod.JobStatus.fromText(s) catch {
+                return respondError(request, .bad_request, "INVALID_REQUEST", "unknown status filter");
+            };
+            break :blk jobs_mod.listByProjectAndStatus(db, gpa, project_id, status) catch {
+                return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Jobs unavailable");
+            };
+        }
+        break :blk jobs_mod.listByProject(db, gpa, project_id) catch {
+            return respondError(request, .internal_server_error, "INTERNAL_ERROR", "Jobs unavailable");
+        };
+    };
+    defer jobs_mod.deinitList(list, gpa);
+
+    // 128 KiB is enough for hundreds of jobs; each entry is ~200 bytes at most.
+    var buf: [128 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.writeAll("[");
+    for (list, 0..) |j, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"job_id\":");
+        try json.writeJsonString(&w, j.id);
+        try w.writeAll(",\"type\":");
+        try json.writeJsonString(&w, @tagName(j.type));
+        try w.writeAll(",\"status\":");
+        try json.writeJsonString(&w, @tagName(j.status));
+        try w.print(",\"progress\":{d}", .{j.progress});
+        // payload is already a JSON-encoded value — splice raw
+        try w.writeAll(",\"payload\":");
+        try w.writeAll(j.payload);
+        try w.writeAll(",\"created_at\":");
+        try json.writeJsonString(&w, j.created_at);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
     const body = w.buffered();
 
     const headers = [_]std.http.Header{

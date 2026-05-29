@@ -4,17 +4,21 @@ const paths = @import("paths.zig");
 pub const AppConfig = struct {
     data_dir: []u8,
     ui_dir: []u8,
+    agents_dir: []u8,
 
     pub fn load(io: std.Io, gpa: std.mem.Allocator, env: *const std.process.Environ.Map) !AppConfig {
         const data_dir = try paths.getAppDataDir(gpa, env);
         errdefer gpa.free(data_dir);
         const ui_dir = try resolveUiDir(io, gpa, env);
-        return .{ .data_dir = data_dir, .ui_dir = ui_dir };
+        errdefer gpa.free(ui_dir);
+        const agents_dir = try paths.resolveAgentsDir(io, gpa, env);
+        return .{ .data_dir = data_dir, .ui_dir = ui_dir, .agents_dir = agents_dir };
     }
 
     pub fn deinit(self: *AppConfig, gpa: std.mem.Allocator) void {
         gpa.free(self.data_dir);
         gpa.free(self.ui_dir);
+        gpa.free(self.agents_dir);
     }
 };
 

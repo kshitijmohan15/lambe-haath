@@ -221,14 +221,15 @@
 <svelte:window onkeydown={onWindowKeydown} />
 
 <div class="flex h-full w-full flex-col">
+	<!-- PDF rendering area (unchanged) -->
 	<div
 		bind:this={scrollEl}
-		class="flex flex-1 items-center justify-center overflow-hidden bg-gray-100 p-4"
+		class="flex flex-1 items-center justify-center overflow-hidden bg-paper p-4"
 	>
 		{#if loading}
-			<div class="p-8 text-gray-500">Loading PDF…</div>
+			<div class="font-sans text-[13px] text-ink-2">Loading PDF…</div>
 		{:else if error}
-			<div class="max-w-md p-8 text-center text-red-600">{error}</div>
+			<div class="max-w-md p-8 text-center font-sans text-[13px] text-err">{error}</div>
 		{/if}
 		<canvas
 			bind:this={canvas}
@@ -239,37 +240,49 @@
 		></canvas>
 	</div>
 
+	<!-- Toolbar chrome (Docket-styled) -->
 	{#if pageCount !== null && pageCount > 0}
-		<div class="flex shrink-0 items-center justify-center gap-2 border-t border-gray-200 bg-white px-4 py-2 text-sm text-gray-700">
+		<div class="flex shrink-0 items-center gap-2 border-t border-line bg-panel px-4 py-2">
+			<!-- Prev button -->
 			<button
 				type="button"
-				class="rounded border border-gray-300 px-2 py-1 hover:bg-gray-50 disabled:opacity-30"
+				class="rounded-[7px] border border-line bg-card px-[10px] py-[5px] font-sans text-[12px] font-semibold text-ink-2 hover:bg-panel disabled:opacity-30 transition-colors"
 				onclick={goPrev}
 				disabled={loading || currentPage <= 1}
-				aria-label="Previous page">‹ Prev</button
-			>
-			<span>Page</span>
-			<input
-				type="number"
-				class="w-16 rounded border border-gray-300 px-2 py-1 text-center"
-				min="1"
-				max={pageCount}
-				bind:value={pageInputValue}
-				onchange={jumpToInput}
-				onkeydown={(e) => {
-					if (e.key === 'Enter') jumpToInput();
-				}}
-				disabled={loading}
-				aria-label="Jump to page"
-			/>
-			<span>of {pageCount}</span>
+				aria-label="Previous page"
+			>‹</button>
+
+			<!-- Page n / total -->
+			<div class="flex flex-1 items-center justify-center gap-1.5">
+				<input
+					type="number"
+					class="w-12 rounded-[6px] border border-line bg-card px-2 py-1 text-center font-mono text-[12px] text-ink-2 focus:outline-none focus:ring-1 focus:ring-navy/30"
+					min="1"
+					max={pageCount}
+					bind:value={pageInputValue}
+					onchange={jumpToInput}
+					onkeydown={(e) => {
+						if (e.key === 'Enter') jumpToInput();
+					}}
+					disabled={loading}
+					aria-label="Jump to page"
+				/>
+				<span class="font-mono text-[12px] text-ink-2">/ {pageCount}</span>
+			</div>
+
+			<!-- Next button -->
 			<button
 				type="button"
-				class="rounded border border-gray-300 px-2 py-1 hover:bg-gray-50 disabled:opacity-30"
+				class="rounded-[7px] border border-line bg-card px-[10px] py-[5px] font-sans text-[12px] font-semibold text-ink-2 hover:bg-panel disabled:opacity-30 transition-colors"
 				onclick={goNext}
 				disabled={loading || currentPage >= pageCount}
-				aria-label="Next page">Next ›</button
-			>
+				aria-label="Next page"
+			>›</button>
+
+			<!-- Keyboard shortcut hint -->
+			<span class="ml-2 font-mono text-[10.5px] text-ink-3 whitespace-nowrap">
+				[ ] · n
+			</span>
 		</div>
 	{/if}
 </div>

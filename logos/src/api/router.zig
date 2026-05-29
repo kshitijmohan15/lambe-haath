@@ -12,6 +12,7 @@ pub const Route = enum {
     projects_chargesheet,
     projects_jobs_slice,
     projects_jobs_get,
+    projects_jobs_list,
     projects_jobs_ocr,
     projects_jobs_ocr_all,
     projects_slices_list,
@@ -112,6 +113,11 @@ pub fn match(method: Method, raw_path: []const u8) Match {
     // /api/v1/projects/:id/chargesheet
     if (method == .GET and std.mem.eql(u8, after_id, "chargesheet")) {
         return .{ .route = .projects_chargesheet, .id = id };
+    }
+
+    // /api/v1/projects/:id/jobs   (list all jobs for project, optional ?status=...)
+    if (method == .GET and std.mem.eql(u8, after_id, "jobs")) {
+        return .{ .route = .projects_jobs_list, .id = id };
     }
 
     // /api/v1/projects/:id/jobs/...
@@ -226,6 +232,19 @@ test "match GET /api/v1/projects/:id/jobs/:job_id" {
     try testing.expectEqual(Route.projects_jobs_get, m.route);
     try testing.expectEqualStrings("proj_abc", m.id.?);
     try testing.expectEqualStrings("job_xyz", m.child.?);
+}
+
+test "router matches GET /api/v1/projects/:id/jobs" {
+    const m = match(.GET, "/api/v1/projects/proj_abc/jobs");
+    try testing.expectEqual(Route.projects_jobs_list, m.route);
+    try testing.expectEqualStrings("proj_abc", m.id.?);
+    try testing.expect(m.child == null);
+}
+
+test "router matches GET /api/v1/projects/:id/jobs with query string" {
+    const m = match(.GET, "/api/v1/projects/proj_abc/jobs?status=running");
+    try testing.expectEqual(Route.projects_jobs_list, m.route);
+    try testing.expectEqualStrings("proj_abc", m.id.?);
 }
 
 test "match GET /api/v1/projects/:id/slices" {

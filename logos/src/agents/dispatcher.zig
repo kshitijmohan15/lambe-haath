@@ -32,6 +32,7 @@ pub const Dispatcher = struct {
     db_mu: *Io.Mutex,
     sup: *Supervisor,
     channel: *EventChannel,
+    data_dir: []const u8,
     stop: std.atomic.Value(bool),
     retry_attempts: std.StringHashMap(u8),
     cancel_requests: std.StringHashMap(void),
@@ -44,6 +45,7 @@ pub const Dispatcher = struct {
         db_mu: *Io.Mutex,
         sup: *Supervisor,
         channel: *EventChannel,
+        data_dir: []const u8,
     ) Dispatcher {
         return .{
             .gpa = gpa,
@@ -52,6 +54,7 @@ pub const Dispatcher = struct {
             .db_mu = db_mu,
             .sup = sup,
             .channel = channel,
+            .data_dir = data_dir,
             .stop = std.atomic.Value(bool).init(false),
             .retry_attempts = std.StringHashMap(u8).init(gpa),
             .cancel_requests = std.StringHashMap(void).init(gpa),
@@ -369,12 +372,54 @@ pub const Dispatcher = struct {
         // Try to acquire a worker.
         const worker = (try self.sup.acquire(kind)) orelse return;
 
-        // Build params JSON.
-        const params = try std.fmt.allocPrint(
-            self.gpa,
-            "{{\"job_id\":\"{s}\",\"payload\":{s},\"_meta\":{{\"progressToken\":\"{s}\"}}}}",
-            .{ job.id, job.payload, job.id },
-        );
+        // Determine method name.
+        const method = switch (job_type) {
+            .ocr => "ocr.extract",
+            .prompt => "prompt.run",
+            .slice => "slice.run", // not dispatched in Plan B but keep it safe
+        };
+
+        // Build agent-specific params JSON.
+        const agent_params = @import("agent_params.zig");
+        const params = switch (job_type) {
+            .ocr => blk: {
+                self.db_mu.lockUncancelable(self.io);
+                const p = agent_params.buildOcrParams(
+                    self.gpa,
+                    self.db,
+                    self.data_dir,
+                    job.id,
+                    job.project_id,
+                    job.payload,
+                ) catch |err| {
+                    self.db_mu.unlock(self.io);
+                    std.log.warn("buildOcrParams failed for job {s}: {s}", .{ job.id, @errorName(err) });
+                    self.sup.release(worker);
+                    return;
+                };
+                self.db_mu.unlock(self.io);
+                break :blk p;
+            },
+            .prompt => blk: {
+                self.db_mu.lockUncancelable(self.io);
+                const p = agent_params.buildPromptParams(
+                    self.gpa,
+                    self.db,
+                    self.data_dir,
+                    job.id,
+                    job.project_id,
+                    job.payload,
+                ) catch |err| {
+                    self.db_mu.unlock(self.io);
+                    std.log.warn("buildPromptParams failed for job {s}: {s}", .{ job.id, @errorName(err) });
+                    self.sup.release(worker);
+                    return;
+                };
+                self.db_mu.unlock(self.io);
+                break :blk p;
+            },
+            .slice => unreachable,
+        };
         defer self.gpa.free(params);
 
         // Assign job to worker (owned copy).
@@ -388,13 +433,6 @@ pub const Dispatcher = struct {
         self.db_mu.lockUncancelable(self.io);
         jobs_mod.markRunning(self.db, job.id, now) catch {};
         self.db_mu.unlock(self.io);
-
-        // Determine method name.
-        const method = switch (job_type) {
-            .ocr => "ocr.extract",
-            .prompt => "prompt.run",
-            .slice => "slice.run", // not dispatched in Plan B but keep it safe
-        };
 
         // Send the request; on failure, release the worker and re-queue.
         _ = worker.sendRequest(self.gpa, method, params) catch {
@@ -699,10 +737,10 @@ test "Dispatcher.init / requestStop / deinit don't leak" {
     var cfg = config_mod.AgentConfig{ .agents = &specs };
     var ch = EventChannel.init(gpa, io);
     defer ch.deinit();
-    var sup = Supervisor.init(io, gpa, &cfg, &ch);
+    var sup = Supervisor.init(io, gpa, &cfg, &ch, ".");
     defer sup.deinit();
 
-    var d = Dispatcher.init(io, gpa, &db, &mu, &sup, &ch);
+    var d = Dispatcher.init(io, gpa, &db, &mu, &sup, &ch, "/tmp/test-data");
     defer d.deinit();
 
     d.requestStop();

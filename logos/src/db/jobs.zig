@@ -179,6 +179,15 @@ pub fn listByStatus(db: *Db, gpa: Allocator, status: JobStatus) ![]Job {
     , .{status.toText()});
 }
 
+/// List jobs for a project filtered by status. Ordered by created_at DESC.
+pub fn listByProjectAndStatus(db: *Db, gpa: Allocator, project_id: []const u8, status: JobStatus) ![]Job {
+    return collectRows(db, gpa,
+        \\SELECT id, project_id, type, status, progress, payload, results, error,
+        \\       created_at, updated_at
+        \\FROM jobs WHERE project_id = ? AND status = ? ORDER BY created_at DESC
+    , .{ project_id, status.toText() });
+}
+
 pub fn updateProgress(db: *Db, id: []const u8, progress: f64) !void {
     var buf: [128]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
@@ -403,6 +412,35 @@ test "listByProject and listByStatus filter correctly" {
     const by_status = try listByStatus(&db, gpa, .queued);
     defer deinitList(by_status, gpa);
     try std.testing.expectEqual(@as(usize, 2), by_status.len);
+}
+
+test "listByProjectAndStatus returns only matching status" {
+    const gpa = std.testing.allocator;
+    var db = try test_helpers.openTestDb();
+    defer db.close();
+    try seedProject(&db, gpa, "p1");
+
+    // Insert one queued + one running + one completed.
+    try insert(&db, gpa, .{
+        .id = "job_a", .project_id = "p1", .type = .ocr, .status = .queued,
+        .progress = 0.0, .payload = "{}", .results = null, .error_msg = null,
+        .created_at = "2026-05-28T00:00:00Z", .updated_at = "2026-05-28T00:00:00Z",
+    });
+    try insert(&db, gpa, .{
+        .id = "job_b", .project_id = "p1", .type = .ocr, .status = .running,
+        .progress = 0.5, .payload = "{}", .results = null, .error_msg = null,
+        .created_at = "2026-05-28T00:01:00Z", .updated_at = "2026-05-28T00:01:00Z",
+    });
+    try insert(&db, gpa, .{
+        .id = "job_c", .project_id = "p1", .type = .ocr, .status = .completed,
+        .progress = 1.0, .payload = "{}", .results = "[]", .error_msg = null,
+        .created_at = "2026-05-28T00:02:00Z", .updated_at = "2026-05-28T00:03:00Z",
+    });
+
+    const list = try listByProjectAndStatus(&db, gpa, "p1", .running);
+    defer deinitList(list, gpa);
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqualStrings("job_b", list[0].id);
 }
 
 test "updateProgress writes progress and refreshes updated_at" {

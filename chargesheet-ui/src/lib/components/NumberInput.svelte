@@ -25,7 +25,12 @@
 
 <div class="w-full">
 	{#if label}
-		<label for={id} class="mb-1 block text-xs font-medium text-gray-700">{label}</label>
+		<label
+			for={id}
+			class="mb-2 block font-sans text-[10px] font-semibold uppercase tracking-[0.6px] text-ink-3"
+		>
+			{label}
+		</label>
 	{/if}
 	<input
 		{id}
@@ -34,12 +39,12 @@
 		{min}
 		{max}
 		{disabled}
-		class="block w-full rounded border px-2 py-1 text-sm tabular-nums focus:outline-none focus:ring-1 disabled:bg-gray-100 disabled:text-gray-500 {error
-			? 'border-red-400 focus:border-red-500 focus:ring-red-500'
-			: 'border-gray-300 focus:border-blue-500 focus:ring-blue-500'} {extraClass}"
+		class="w-full rounded-[9px] border bg-card px-3 py-[10px] font-sans text-[13px] tabular-nums text-ink placeholder:text-ink-3 focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:bg-panel disabled:text-ink-3 {error
+			? 'border-err focus:border-err focus:ring-err/20'
+			: 'border-line focus:border-navy focus:ring-navy/20'} {extraClass}"
 		{...rest}
 	/>
 	{#if error}
-		<p class="mt-0.5 text-xs text-red-600">{error}</p>
+		<p class="mt-1.5 font-sans text-[12px] text-err">{error}</p>
 	{/if}
 </div>

@@ -1,11 +1,11 @@
 <script lang="ts">
 	import type { Project } from '$lib/api/types';
 	import { goto } from '$app/navigation';
-	import { formatBytes, formatRelative } from '$lib/utils/format';
+	import { formatRelative } from '$lib/utils/format';
 	import { projectsStore } from '$lib/stores/projects.svelte';
 	import { toastsStore } from '$lib/stores/toasts.svelte';
-	import Button from './Button.svelte';
 	import ConfirmDialog from './ConfirmDialog.svelte';
+	import ProgressRing from './ProgressRing.svelte';
 
 	interface Props {
 		project: Project;
@@ -15,16 +15,33 @@
 	let confirmOpen = $state(false);
 	let deleting = $state(false);
 
-	function open() {
-		void goto(`/projects/${project.id}`);
-	}
+	const stages: Record<string, string> = {
+		slice: 'Slice',
+		extract: 'Extract',
+		analyze: 'Analyze',
+		review: 'Review'
+	};
 
-	function onKey(e: KeyboardEvent) {
-		if (e.key === 'Enter' || e.key === ' ') {
-			e.preventDefault();
-			open();
-		}
-	}
+	const stage = $derived(stages[project.current_stage] ?? 'Slice');
+
+	// Completion across the whole pipeline: each of (slice exists, extractions, prompts) contributes 1/3.
+	const completionPercent = $derived.by(() => {
+		const sliceFrac = project.slice_count > 0 ? 1 : 0;
+		const extractFrac =
+			project.slice_count > 0 ? Math.min(1, project.extraction_count / project.slice_count) : 0;
+		const promptFrac = Math.min(1, project.prompt_count / 5);
+		return (sliceFrac + extractFrac + promptFrac) / 3;
+	});
+
+	// relativeUpdated: use last_opened_at (the most recently-touched timestamp available)
+	const relativeUpdated = $derived(formatRelative(project.last_opened_at));
+
+	// pageCount from chargesheet metadata
+	const pageCount = $derived(project.chargesheet.page_count);
+
+	// Secondary (citation) line: chargesheet filename in mono/navy — the most
+	// meaningful identifier available. No dedicated "citation" field on the schema.
+	const citation = $derived(project.chargesheet.filename);
 
 	async function performDelete() {
 		deleting = true;
@@ -39,48 +56,70 @@
 	}
 </script>
 
-<div
-	role="link"
-	tabindex="0"
-	class="group relative flex flex-col gap-2 rounded-lg border border-gray-200 bg-white p-4 transition-shadow hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 cursor-pointer"
-	onclick={open}
-	onkeydown={onKey}
+<a
+	href={`/projects/${project.id}`}
+	class="group relative block rounded-card border border-line bg-card p-5 transition-all duration-150 hover:-translate-y-px hover:shadow-[0_6px_20px_rgba(40,35,25,0.10)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-navy/40"
+	style="box-shadow: 0 1px 2px rgba(40,35,25,0.04);"
 >
-	<div class="flex items-start justify-between gap-2">
-		<h3 class="line-clamp-1 text-base font-semibold text-gray-900">{project.name}</h3>
-		<button
-			type="button"
-			class="invisible rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-600 group-hover:visible focus-visible:visible"
-			aria-label="Delete project"
-			onclick={(e) => {
-				e.stopPropagation();
-				confirmOpen = true;
-			}}
-		>
-			<svg viewBox="0 0 20 20" class="h-4 w-4" fill="currentColor">
-				<path
-					fill-rule="evenodd"
-					d="M8.75 1A1.75 1.75 0 0 0 7 2.75V3H4a1 1 0 0 0 0 2h12a1 1 0 1 0 0-2h-3v-.25A1.75 1.75 0 0 0 11.25 1h-2.5ZM6 7a1 1 0 0 1 1 1v8a1 1 0 1 1-2 0V8a1 1 0 0 1 1-1Zm4 0a1 1 0 0 1 1 1v8a1 1 0 1 1-2 0V8a1 1 0 0 1 1-1Zm4 0a1 1 0 0 1 1 1v8a1 1 0 1 1-2 0V8a1 1 0 0 1 1-1Z"
-					clip-rule="evenodd"
-				/>
-			</svg>
-		</button>
-	</div>
-	{#if project.description}
-		<p class="line-clamp-2 text-sm text-gray-600">{project.description}</p>
-	{/if}
-	<div class="mt-auto space-y-0.5 text-xs text-gray-500">
-		<div class="line-clamp-1">{project.chargesheet.filename}</div>
-		<div>
-			{project.chargesheet.page_count} pages · {formatBytes(project.chargesheet.size_bytes)}
+	<!-- Header: matter name + filename column (flex-1 min-w-0 critical) + progress ring -->
+	<div class="flex items-start gap-3">
+		<div class="min-w-0 flex-1">
+			<div class="truncate font-serif text-[18px] font-semibold leading-tight text-ink">
+				{project.name}
+			</div>
+			<div class="mt-1 truncate font-mono text-[11px] font-medium text-navy">
+				{citation}
+			</div>
 		</div>
-		<div>Opened {formatRelative(project.last_opened_at)}</div>
+		<ProgressRing percent={completionPercent} />
 	</div>
-</div>
+
+	<!-- Description (serif, ink-2) — only if present -->
+	{#if project.description}
+		<div class="mt-3 line-clamp-3 font-serif text-[14px] font-normal leading-[1.7] text-ink-2">
+			{project.description}
+		</div>
+	{/if}
+
+	<!-- Divider -->
+	<div class="mt-4 border-t border-line-2 pt-3"></div>
+
+	<!-- Footer: page count + stage/updated pill -->
+	<div class="flex items-center justify-between gap-3">
+		<div class="flex items-center gap-3 font-mono text-[11px] font-medium text-ink-3">
+			<span>{pageCount}p</span> · <span>{project.slice_count} slices</span>
+		</div>
+		<span
+			class="whitespace-nowrap rounded-full bg-navy-soft px-2.5 py-1 font-sans text-[11px] font-semibold text-navy"
+		>
+			{stage} · {relativeUpdated}
+		</span>
+	</div>
+
+	<!-- Delete button (visible on group hover) -->
+	<button
+		type="button"
+		class="absolute right-3 top-3 invisible rounded p-1 text-ink-3 hover:bg-[rgba(162,59,46,0.08)] hover:text-err group-hover:visible focus-visible:visible"
+		aria-label="Delete matter"
+		onclick={(e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			confirmOpen = true;
+		}}
+	>
+		<svg viewBox="0 0 20 20" class="h-4 w-4" fill="currentColor">
+			<path
+				fill-rule="evenodd"
+				d="M8.75 1A1.75 1.75 0 0 0 7 2.75V3H4a1 1 0 0 0 0 2h12a1 1 0 1 0 0-2h-3v-.25A1.75 1.75 0 0 0 11.25 1h-2.5ZM6 7a1 1 0 0 1 1 1v8a1 1 0 1 1-2 0V8a1 1 0 0 1 1-1Zm4 0a1 1 0 0 1 1 1v8a1 1 0 1 1-2 0V8a1 1 0 0 1 1-1Zm4 0a1 1 0 0 1 1 1v8a1 1 0 1 1-2 0V8a1 1 0 0 1 1-1Z"
+				clip-rule="evenodd"
+			/>
+		</svg>
+	</button>
+</a>
 
 <ConfirmDialog
 	bind:open={confirmOpen}
-	title="Delete project?"
+	title="Delete matter?"
 	message={`"${project.name}" and all its slices will be removed. This cannot be undone.`}
 	confirmText={deleting ? 'Deleting…' : 'Delete'}
 	cancelText="Cancel"

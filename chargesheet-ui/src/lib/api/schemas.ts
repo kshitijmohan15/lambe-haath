@@ -12,7 +12,11 @@ export const ProjectSchema = z.object({
 	description: z.string().nullable(),
 	created_at: z.string(),
 	last_opened_at: z.string(),
-	chargesheet: ChargesheetMetadataSchema
+	chargesheet: ChargesheetMetadataSchema,
+	slice_count: z.number().int().nonnegative(),
+	extraction_count: z.number().int().nonnegative(),
+	prompt_count: z.number().int().nonnegative(),
+	current_stage: z.enum(['slice', 'extract', 'analyze', 'review'])
 });
 
 export const ProjectListSchema = z.array(ProjectSchema);
@@ -122,6 +126,19 @@ export const JobSchema = z.object({
 	results: z.unknown().nullable(),
 	error: z.string().nullable(),
 });
+
+// --- Job list (GET /projects/:id/jobs) ---
+
+export const JobListEntrySchema = z.object({
+	job_id: z.string(),
+	type: z.enum(['slice', 'ocr', 'prompt']),
+	status: JobStatusSchema,
+	progress: z.number().min(0).max(1),
+	payload: z.unknown(), // raw JSON value; UI extracts slice_filename / prompt_name from it
+	created_at: z.string(),
+});
+
+export const JobsListResponseSchema = z.array(JobListEntrySchema);
 
 // --- Stats ---
 

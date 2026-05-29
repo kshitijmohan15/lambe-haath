@@ -34,36 +34,49 @@
 	}
 </script>
 
-<div class="flex h-full flex-col">
-	<div class="flex items-baseline justify-between border-b border-gray-200 px-4 py-3">
-		<h2 class="text-sm font-semibold text-gray-800">
-			Slices <span class="text-gray-400">({slicesStore.slices.length})</span>
-		</h2>
+<div class="flex h-full flex-col bg-card rounded-[14px] border border-line overflow-hidden">
+	<!-- Header row -->
+	<div class="flex items-center justify-between border-b border-line bg-panel px-4 py-[13px]">
+		<div class="flex items-center gap-2">
+			<span class="font-sans text-[10px] font-semibold uppercase tracking-[0.6px] text-ink-3">
+				Slices
+			</span>
+			<span class="font-mono text-[11px] text-ink-3">· {slicesStore.slices.length}</span>
+		</div>
 		<Button variant="secondary" size="sm" onclick={addSlice} disabled={submitting}>
 			+ Add slice
 		</Button>
 	</div>
 
-	<div class="flex-1 space-y-2 overflow-y-auto px-4 py-3">
+	<!-- Slice rows -->
+	<div class="flex-1 overflow-y-auto p-3">
 		{#if slicesStore.slices.length === 0}
-			<div class="rounded border border-dashed border-gray-300 px-4 py-8 text-center text-sm text-gray-500">
-				No slices yet. Press <span class="font-medium">n</span> or click
-				<span class="font-medium">+ Add slice</span> to start.
+			<div class="rounded-[10px] border border-dashed border-line px-4 py-8 text-center font-sans text-[12.5px] font-medium text-ink-3">
+				No slices yet. Press <span class="font-semibold text-navy">n</span> or click
+				<span class="font-semibold text-navy">+ Add slice</span> to start.
 			</div>
 		{:else}
-			{#each slicesStore.slices as slice (slice.id)}
-				<SliceListItem {slice} errors={errorsBySlice[slice.id] ?? {}} disabled={submitting} />
-			{/each}
+			<div class="space-y-2">
+				{#each slicesStore.slices as slice (slice.id)}
+					<SliceListItem {slice} errors={errorsBySlice[slice.id] ?? {}} disabled={submitting} />
+				{/each}
+			</div>
 		{/if}
 	</div>
 
-	<div class="border-t border-gray-200 px-4 py-3">
-		<Button variant="primary" full onclick={onSubmit} disabled={!submittable}>
+	<!-- Save button footer -->
+	<div class="border-t border-line px-[18px] py-[14px]">
+		<button
+			type="button"
+			class="w-full rounded-[8px] bg-navy py-3 font-sans text-[12.5px] font-semibold text-white transition-colors hover:bg-navy-dk disabled:cursor-not-allowed disabled:opacity-40"
+			onclick={onSubmit}
+			disabled={!submittable}
+		>
 			{submitting
 				? 'Submitting…'
 				: slicesStore.slices.length > 0
-					? `Save ${slicesStore.slices.length} slice${slicesStore.slices.length === 1 ? '' : 's'}`
+					? `Save ${slicesStore.slices.length} slice${slicesStore.slices.length === 1 ? '' : 's'} & extract →`
 					: 'Save slices'}
-		</Button>
+		</button>
 	</div>
 </div>

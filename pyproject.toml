@@ -1,0 +1,24 @@
+[project]
+name = "lambe-haath-agents"
+version = "0.1.0"
+description = "Python OCR and prompt agents for the lambe-haath chargesheet pipeline"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.40.0",
+    "google-genai>=2.6.0",
+    "pypdf>=5.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "protocol: protocol-conformance tests (drive an agent binary through the lambe-haath/1 lifecycle)",
+    "unit: pure unit tests (no I/O, no subprocesses)",
+    "live: opt-in tests that hit real upstream APIs (cost real money; LAMBE_LIVE_TESTS=1 to run)",
+]

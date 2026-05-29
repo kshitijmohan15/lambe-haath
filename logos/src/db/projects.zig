@@ -13,6 +13,10 @@ pub const Project = struct {
     chargesheet_filename: []const u8,
     chargesheet_page_count: u32,
     chargesheet_size_bytes: u64,
+    // Count fields — populated by listAll / getById via subquery.
+    slice_count: u32 = 0,
+    extraction_count: u32 = 0,
+    prompt_count: u32 = 0,
 
     pub fn deinit(self: *Project, gpa: Allocator) void {
         gpa.free(self.id);
@@ -23,6 +27,14 @@ pub const Project = struct {
         gpa.free(self.chargesheet_filename);
     }
 };
+
+/// Derive the current pipeline stage from the project's counts.
+pub fn currentStage(p: Project) []const u8 {
+    if (p.slice_count == 0) return "slice";
+    if (p.extraction_count < p.slice_count) return "extract";
+    if (p.prompt_count < 5) return "analyze";
+    return "review";
+}
 
 pub fn deinitList(list: []Project, gpa: Allocator) void {
     for (list) |*p| p.deinit(gpa);
@@ -58,9 +70,12 @@ pub fn listAll(db: *Db, gpa: Allocator) ![]Project {
     }
 
     var rows = try db.conn.rows(
-        \\SELECT id, name, description, created_at, last_opened_at,
-        \\       chargesheet_filename, chargesheet_page_count, chargesheet_size_bytes
-        \\FROM projects ORDER BY last_opened_at DESC
+        \\SELECT p.id, p.name, p.description, p.created_at, p.last_opened_at,
+        \\       p.chargesheet_filename, p.chargesheet_page_count, p.chargesheet_size_bytes,
+        \\       (SELECT COUNT(*) FROM slices      WHERE project_id = p.id) AS slice_count,
+        \\       (SELECT COUNT(*) FROM extractions WHERE project_id = p.id) AS extraction_count,
+        \\       (SELECT COUNT(*) FROM prompt_outputs WHERE project_id = p.id) AS prompt_count
+        \\FROM projects p ORDER BY p.last_opened_at DESC
     , .{});
     defer rows.deinit();
 
@@ -90,6 +105,9 @@ pub fn listAll(db: *Db, gpa: Allocator) ![]Project {
             .chargesheet_filename = filename_owned,
             .chargesheet_page_count = @intCast(row.int(6)),
             .chargesheet_size_bytes = @intCast(row.int(7)),
+            .slice_count = @intCast(row.int(8)),
+            .extraction_count = @intCast(row.int(9)),
+            .prompt_count = @intCast(row.int(10)),
         };
         try list.append(gpa, project);
     }
@@ -127,9 +145,12 @@ pub fn existsByName(db: *Db, name: []const u8) !bool {
 
 pub fn getById(db: *Db, gpa: Allocator, id: []const u8) !?Project {
     const row = (try db.conn.row(
-        \\SELECT id, name, description, created_at, last_opened_at,
-        \\       chargesheet_filename, chargesheet_page_count, chargesheet_size_bytes
-        \\FROM projects WHERE id = ?
+        \\SELECT p.id, p.name, p.description, p.created_at, p.last_opened_at,
+        \\       p.chargesheet_filename, p.chargesheet_page_count, p.chargesheet_size_bytes,
+        \\       (SELECT COUNT(*) FROM slices      WHERE project_id = p.id) AS slice_count,
+        \\       (SELECT COUNT(*) FROM extractions WHERE project_id = p.id) AS extraction_count,
+        \\       (SELECT COUNT(*) FROM prompt_outputs WHERE project_id = p.id) AS prompt_count
+        \\FROM projects p WHERE p.id = ?
     ,
         .{id},
     )) orelse return null;
@@ -158,6 +179,9 @@ pub fn getById(db: *Db, gpa: Allocator, id: []const u8) !?Project {
         .chargesheet_filename = filename_owned,
         .chargesheet_page_count = @intCast(row.int(6)),
         .chargesheet_size_bytes = @intCast(row.int(7)),
+        .slice_count = @intCast(row.int(8)),
+        .extraction_count = @intCast(row.int(9)),
+        .prompt_count = @intCast(row.int(10)),
     };
 }
 
@@ -343,4 +367,168 @@ test "existsByName returns true/false correctly" {
 
     try std.testing.expect(try existsByName(&db, "Anything"));
     try std.testing.expect(!try existsByName(&db, "anything")); // case-sensitive
+}
+
+// ---------------------------------------------------------------------------
+// currentStage unit tests (pure logic, no DB required)
+// ---------------------------------------------------------------------------
+
+test "currentStage: no slices -> slice" {
+    const p: Project = .{
+        .id = "", .name = "", .description = null,
+        .created_at = "", .last_opened_at = "",
+        .chargesheet_filename = "", .chargesheet_page_count = 1, .chargesheet_size_bytes = 0,
+        .slice_count = 0, .extraction_count = 0, .prompt_count = 0,
+    };
+    try std.testing.expectEqualStrings("slice", currentStage(p));
+}
+
+test "currentStage: extractions < slices -> extract" {
+    const p: Project = .{
+        .id = "", .name = "", .description = null,
+        .created_at = "", .last_opened_at = "",
+        .chargesheet_filename = "", .chargesheet_page_count = 1, .chargesheet_size_bytes = 0,
+        .slice_count = 3, .extraction_count = 1, .prompt_count = 0,
+    };
+    try std.testing.expectEqualStrings("extract", currentStage(p));
+}
+
+test "currentStage: slices == extractions, prompts < 5 -> analyze" {
+    const p: Project = .{
+        .id = "", .name = "", .description = null,
+        .created_at = "", .last_opened_at = "",
+        .chargesheet_filename = "", .chargesheet_page_count = 1, .chargesheet_size_bytes = 0,
+        .slice_count = 2, .extraction_count = 2, .prompt_count = 3,
+    };
+    try std.testing.expectEqualStrings("analyze", currentStage(p));
+}
+
+test "currentStage: prompts >= 5 -> review" {
+    const p: Project = .{
+        .id = "", .name = "", .description = null,
+        .created_at = "", .last_opened_at = "",
+        .chargesheet_filename = "", .chargesheet_page_count = 1, .chargesheet_size_bytes = 0,
+        .slice_count = 2, .extraction_count = 2, .prompt_count = 5,
+    };
+    try std.testing.expectEqualStrings("review", currentStage(p));
+}
+
+// ---------------------------------------------------------------------------
+// listAll + getById count subquery integration tests
+// ---------------------------------------------------------------------------
+
+test "listAll: project with no slices has slice_count=0, stage=slice" {
+    const gpa = std.testing.allocator;
+    var db = try test_helpers.openTestDb();
+    defer db.close();
+
+    try insert(&db, gpa, .{
+        .id = "p1", .name = "P1", .description = null,
+        .created_at = "2026-05-29T00:00:00Z", .last_opened_at = "2026-05-29T00:00:00Z",
+        .chargesheet_filename = "p1.pdf", .chargesheet_page_count = 5, .chargesheet_size_bytes = 100,
+    });
+
+    const list = try listAll(&db, gpa);
+    defer deinitList(list, gpa);
+
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqual(@as(u32, 0), list[0].slice_count);
+    try std.testing.expectEqual(@as(u32, 0), list[0].extraction_count);
+    try std.testing.expectEqual(@as(u32, 0), list[0].prompt_count);
+    try std.testing.expectEqualStrings("slice", currentStage(list[0]));
+}
+
+test "listAll: 2 slices, 1 extraction -> stage=extract" {
+    const gpa = std.testing.allocator;
+    var db = try test_helpers.openTestDb();
+    defer db.close();
+
+    const slices_mod = @import("slices.zig");
+    const extractions_mod = @import("extractions.zig");
+
+    try insert(&db, gpa, .{
+        .id = "p1", .name = "P1", .description = null,
+        .created_at = "2026-05-29T00:00:00Z", .last_opened_at = "2026-05-29T00:00:00Z",
+        .chargesheet_filename = "p1.pdf", .chargesheet_page_count = 10, .chargesheet_size_bytes = 200,
+    });
+
+    try slices_mod.insert(&db, gpa, .{
+        .project_id = "p1", .filename = "s1.pdf",
+        .start_page = 1, .end_page = 3, .size_bytes = 50, .created_at = "2026-05-29T00:00:00Z",
+    });
+    try slices_mod.insert(&db, gpa, .{
+        .project_id = "p1", .filename = "s2.pdf",
+        .start_page = 4, .end_page = 6, .size_bytes = 50, .created_at = "2026-05-29T00:00:01Z",
+    });
+
+    try extractions_mod.upsert(&db, gpa, .{
+        .project_id = "p1", .slice_filename = "s1.pdf",
+        .markdown_path = "m.md", .meta_path = "m.json",
+        .model = "gemini", .pages = 3, .page_markers_found = 3, .latency_s = 1.0,
+        .created_at = "2026-05-29T00:00:02Z",
+    });
+
+    const list = try listAll(&db, gpa);
+    defer deinitList(list, gpa);
+
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqual(@as(u32, 2), list[0].slice_count);
+    try std.testing.expectEqual(@as(u32, 1), list[0].extraction_count);
+    try std.testing.expectEqualStrings("extract", currentStage(list[0]));
+}
+
+test "listAll: 2 slices, 2 extractions, 5 prompt_outputs -> stage=review" {
+    const gpa = std.testing.allocator;
+    var db = try test_helpers.openTestDb();
+    defer db.close();
+
+    const slices_mod = @import("slices.zig");
+    const extractions_mod = @import("extractions.zig");
+    const prompts_mod = @import("prompt_outputs.zig");
+
+    try insert(&db, gpa, .{
+        .id = "p1", .name = "P1", .description = null,
+        .created_at = "2026-05-29T00:00:00Z", .last_opened_at = "2026-05-29T00:00:00Z",
+        .chargesheet_filename = "p1.pdf", .chargesheet_page_count = 10, .chargesheet_size_bytes = 200,
+    });
+
+    try slices_mod.insert(&db, gpa, .{
+        .project_id = "p1", .filename = "s1.pdf",
+        .start_page = 1, .end_page = 3, .size_bytes = 50, .created_at = "2026-05-29T00:00:00Z",
+    });
+    try slices_mod.insert(&db, gpa, .{
+        .project_id = "p1", .filename = "s2.pdf",
+        .start_page = 4, .end_page = 6, .size_bytes = 50, .created_at = "2026-05-29T00:00:01Z",
+    });
+
+    try extractions_mod.upsert(&db, gpa, .{
+        .project_id = "p1", .slice_filename = "s1.pdf",
+        .markdown_path = "m1.md", .meta_path = "m1.json",
+        .model = "gemini", .pages = 3, .page_markers_found = 3, .latency_s = 1.0,
+        .created_at = "2026-05-29T00:00:02Z",
+    });
+    try extractions_mod.upsert(&db, gpa, .{
+        .project_id = "p1", .slice_filename = "s2.pdf",
+        .markdown_path = "m2.md", .meta_path = "m2.json",
+        .model = "gemini", .pages = 3, .page_markers_found = 3, .latency_s = 1.0,
+        .created_at = "2026-05-29T00:00:03Z",
+    });
+
+    inline for (.{ "q1", "q2", "q3", "q4", "q5" }) |pn| {
+        try prompts_mod.upsert(&db, gpa, .{
+            .project_id = "p1", .prompt_name = pn,
+            .markdown_path = pn ++ ".md", .model = "claude",
+            .latency_s = 1.0, .warnings_json = "[]",
+            .created_at = "2026-05-29T00:00:10Z",
+        });
+    }
+
+    const list = try listAll(&db, gpa);
+    defer deinitList(list, gpa);
+
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqual(@as(u32, 2), list[0].slice_count);
+    try std.testing.expectEqual(@as(u32, 2), list[0].extraction_count);
+    try std.testing.expectEqual(@as(u32, 5), list[0].prompt_count);
+    try std.testing.expectEqualStrings("review", currentStage(list[0]));
 }

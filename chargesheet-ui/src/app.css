@@ -1,2 +1,57 @@
 @import 'tailwindcss';
 @plugin "@tailwindcss/typography";
+
+/* Fonts — Public Sans (sans/UI), Spectral (serif/content), IBM Plex Mono */
+@import url('https://fonts.googleapis.com/css2?family=Public+Sans:ital,wght@0,400;0,500;0,600;0,700&family=Spectral:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+@theme {
+  /* surfaces */
+  --color-paper: #f3efe5;
+  --color-panel: #fbf9f3;
+  --color-card:  #ffffff;
+
+  /* ink / text */
+  --color-ink:   #22201b;
+  --color-ink-2: #6c675c;
+  --color-ink-3: #9c968a;
+
+  /* lines */
+  --color-line:   rgba(40, 35, 25, 0.11);
+  --color-line-2: rgba(40, 35, 25, 0.07);
+
+  /* accent (Ink navy — default) */
+  --color-navy:      #1e3a5f;
+  --color-navy-dk:   #152a44;
+  --color-navy-soft: #eaeff5;
+
+  /* status */
+  --color-ok:   #4f7a52;
+  --color-warn: #b07a2e;
+  --color-err:  #a23b2e;
+
+  /* type families */
+  --font-sans:  'Public Sans', system-ui, sans-serif;
+  --font-serif: 'Spectral', Georgia, serif;
+  --font-mono:  'IBM Plex Mono', ui-monospace, monospace;
+
+  /* radii */
+  --radius-card: 14px;
+  --radius-ctl:  9px;
+}
+
+/* App default surface + text */
+:root {
+  color-scheme: light;
+}
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Optional: alternate accents (set data-accent on <html> to switch).
+   Default above is Ink navy. */
+[data-accent='burgundy'] { --color-navy: #6e2433; --color-navy-dk: #551a26; --color-navy-soft: #f4ebec; }
+[data-accent='forest']   { --color-navy: #1f5c4d; --color-navy-dk: #16453a; --color-navy-soft: #e8f1ed; }
+[data-accent='slate']    { --color-navy: #3a4150; --color-navy-dk: #2a3039; --color-navy-soft: #edeef1; }
