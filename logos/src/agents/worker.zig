@@ -241,7 +241,7 @@ pub fn spawn(
     // --- Initialize handshake ---
     // Send initialize request (id=0).
     const init_req =
-        \\{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"lambe-haath/1","hostInfo":{"name":"logos","version":"0.1.0"},"capabilities":{"progress":true,"cancellation":true}}}
+        \\{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"lambe-haath/1","hostInfo":{"name":"logos","version":"0.2.0"},"capabilities":{"progress":true,"cancellation":true}}}
         \\
     ;
     {

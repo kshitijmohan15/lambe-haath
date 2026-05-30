@@ -9,7 +9,7 @@ const event_channel_mod = @import("agents/event_channel.zig");
 const supervisor_mod = @import("agents/supervisor.zig");
 const dispatcher_mod = @import("agents/dispatcher.zig");
 
-const version = "0.1.0";
+const version = "0.2.0";
 const default_port: u16 = 7777;
 
 const help_body =
