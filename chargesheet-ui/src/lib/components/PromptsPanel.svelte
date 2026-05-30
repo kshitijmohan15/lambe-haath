@@ -271,9 +271,12 @@
 				{#if viewerLoading}
 					<div class="font-sans text-[13px] text-ink-2">Loading…</div>
 				{:else}
-					<div class="prose prose-sm max-w-none">
-						<MarkdownViewer markdown={viewerMarkdown} />
-					</div>
+					<!-- MarkdownViewer already wraps content in `prose prose-sm`.
+					     A second outer wrapper causes nested-prose breakage —
+					     tables lose their borders/padding because the inner
+					     selectors don't compose. Pass overrides via the `class`
+					     prop instead. -->
+					<MarkdownViewer markdown={viewerMarkdown} />
 				{/if}
 			</div>
 		{:else}
