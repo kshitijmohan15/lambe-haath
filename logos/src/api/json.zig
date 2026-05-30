@@ -24,9 +24,9 @@ pub fn writeError(w: *std.Io.Writer, code: []const u8, message: []const u8) !voi
 test "writeHealth produces the expected shape" {
     var buf: [128]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try writeHealth(&w, "0.1.0");
+    try writeHealth(&w, "0.2.0");
     try std.testing.expectEqualStrings(
-        \\{"status":"ok","version":"0.1.0"}
+        \\{"status":"ok","version":"0.2.0"}
     , w.buffered());
 }
 
